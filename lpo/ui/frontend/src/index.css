@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reset a couple of defaults for a clean dark IDE-style shell. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+pre.lpo-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Simple scrollbar tweak for the long history list. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #474a52 #141619;
+}

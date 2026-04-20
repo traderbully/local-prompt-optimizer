@@ -1,0 +1,31 @@
+task_name: example_json_extract
+mode: autonomous
+
+target_strategy: single
+target_models:
+  - slug: local-lmstudio
+    provider: lmstudio
+    base_url: http://localhost:1234/v1
+    model_id: google/gemma-4-26b-a4b
+    temperature: 0.2
+    max_tokens: 512
+    seed_policy: fixed_per_example
+    fixed_seed: 7
+
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-7
+
+stop_conditions:
+  target_score: 95
+  max_iterations: 10
+  plateau_patience: 3
+  cost_cap_usd: 2.00
+
+metric_evolution:
+  enabled: false
+  check_every_n_iterations: 5
+  require_user_approval: true
+
+output_type: json
+eval_concurrency: 4

@@ -1,0 +1,5 @@
+{"id": "ex_001", "input": "Join us for PyData Austin on 2025-03-14 at the Austin Convention Center!", "scenario": "standard", "weight": 1.0}
+{"id": "ex_002", "input": "The annual Rustfest is going fully remote this year. Save the date: November 2, 2025.", "scenario": "online", "weight": 1.0}
+{"id": "ex_003", "input": "KubeCon EU kicks off April 1, 2025 in Paris at the Palais des Congres.", "scenario": "standard", "weight": 1.0}
+{"id": "ex_004", "input": "Mark your calendar — NeurIPS returns Dec 9 2025, Vancouver Convention Centre.", "scenario": "shorthand_date", "weight": 1.5}
+{"id": "ex_005", "input": "Tiny local meetup: 'Embedded Rust Night', 2025-06-20, at Nick's garage in Brooklyn.", "scenario": "casual", "weight": 1.0}

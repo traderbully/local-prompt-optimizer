@@ -1,0 +1,1 @@
+Extract the event name, date, and location from the announcement. Return JSON.

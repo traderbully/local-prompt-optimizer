@@ -1,0 +1,5 @@
+{"id": "ex_001", "output": {"name": "PyData Austin", "date": "2025-03-14", "location": "Austin Convention Center"}}
+{"id": "ex_002", "output": {"name": "Rustfest", "date": "2025-11-02", "location": "online"}}
+{"id": "ex_003", "output": {"name": "KubeCon EU", "date": "2025-04-01", "location": "Palais des Congres, Paris"}}
+{"id": "ex_004", "output": {"name": "NeurIPS", "date": "2025-12-09", "location": "Vancouver Convention Centre"}}
+{"id": "ex_005", "output": {"name": "Embedded Rust Night", "date": "2025-06-20", "location": "Nick's garage, Brooklyn"}}

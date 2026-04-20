@@ -1,0 +1,4 @@
+{"id": "ex_001", "input": "The system utilizes a distributed consensus algorithm to provide strong consistency guarantees across geographically dispersed nodes.", "scenario": "technical", "weight": 1.0}
+{"id": "ex_002", "input": "Users are required to authenticate via a time-based one-time password delivered through an authenticator application prior to accessing sensitive resources.", "scenario": "security", "weight": 1.0}
+{"id": "ex_003", "input": "The subscription billing module supports prorated mid-cycle plan modifications with automatic credit allocation.", "scenario": "billing", "weight": 1.0}
+{"id": "ex_004", "input": "Search queries are executed against an inverted index with stemming, token-based ranking, and query-time filtering.", "scenario": "technical", "weight": 1.0}

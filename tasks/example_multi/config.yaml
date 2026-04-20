@@ -1,0 +1,44 @@
+task_name: example_multi
+mode: autonomous
+
+target_strategy: unified_portable
+parallel_execution: sequential
+unified_aggregation: mean                # min | mean | weighted_mean
+
+target_models:
+  - slug: gemma-4-26b
+    provider: lmstudio
+    base_url: http://localhost:1234/v1
+    model_id: google/gemma-4-26b-a4b
+    temperature: 0.2
+    # See README "Reasoning models" gotcha.
+    max_tokens: 4096
+    seed_policy: fixed_per_example
+    fixed_seed: 7
+
+  - slug: weak-stub
+    provider: stub
+    model_id: stub/weak
+    base_url: ""
+    stub_mode: fixed
+    stub_fixed_text: "Sorry, I cannot parse this input."
+    # Weight only matters for unified_portable + weighted_mean.
+    weight: 1.0
+
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-7
+
+stop_conditions:
+  target_score: 90
+  max_iterations: 3                     # keep costs low for smoke test
+  plateau_patience: 2
+  cost_cap_usd: 2.00
+
+metric_evolution:
+  enabled: false
+  check_every_n_iterations: 5
+  require_user_approval: true
+
+output_type: json
+eval_concurrency: 4

@@ -1,0 +1,43 @@
+task_name: example_or
+mode: autonomous
+
+target_strategy: parallel_independent
+parallel_execution: sequential            # safe for single-GPU local host
+
+target_models:
+  - slug: gemma-4-26b-local
+    provider: lmstudio
+    base_url: http://localhost:1234/v1
+    model_id: google/gemma-4-26b-a4b
+    temperature: 0.2
+    # Reasoning-model budget — see README gotcha.
+    max_tokens: 4096
+    seed_policy: fixed_per_example
+    fixed_seed: 7
+
+  - slug: gemma-4-31b-openrouter
+    provider: openrouter
+    model_id: google/gemma-4-31b-it
+    temperature: 0.2
+    max_tokens: 4096
+    seed_policy: fixed_per_example
+    fixed_seed: 7
+    x_title: LPO
+
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-7
+
+stop_conditions:
+  target_score: 90
+  max_iterations: 3                       # keep cost bounded for smoke
+  plateau_patience: 2
+  cost_cap_usd: 2.50
+
+metric_evolution:
+  enabled: false
+  check_every_n_iterations: 5
+  require_user_approval: true
+
+output_type: json
+eval_concurrency: 4

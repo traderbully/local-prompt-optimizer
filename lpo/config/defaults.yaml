@@ -1,0 +1,2 @@
+# Default values folded into RunConfig at parse time via Pydantic defaults.
+# This file is reserved for future global defaults (e.g., shared model aliases).

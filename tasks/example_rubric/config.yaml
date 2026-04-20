@@ -1,0 +1,36 @@
+task_name: example_rubric
+mode: autonomous
+
+target_strategy: single
+target_models:
+  - slug: local-lmstudio
+    provider: lmstudio
+    base_url: http://localhost:1234/v1
+    model_id: google/gemma-4-26b-a4b
+    temperature: 0.3
+    # Gemma-4 (and other reasoning models) emit a `reasoning_content` CoT
+    # before the final answer. The token cap covers reasoning + content
+    # combined, so it must be generous enough for both. 4k leaves room for
+    # a long CoT plus a one-sentence answer. See README "Reasoning models"
+    # gotcha. Requires an LM Studio context window of ~8k+.
+    max_tokens: 4096
+    seed_policy: fixed_per_example
+    fixed_seed: 11
+
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-7
+
+stop_conditions:
+  target_score: 90
+  max_iterations: 6
+  plateau_patience: 2
+  cost_cap_usd: 3.00
+
+metric_evolution:
+  enabled: false
+  check_every_n_iterations: 5
+  require_user_approval: true
+
+output_type: text
+eval_concurrency: 4

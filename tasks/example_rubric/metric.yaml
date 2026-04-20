@@ -1,0 +1,32 @@
+type: rubric
+judge_model: claude-opus-4-7
+criteria:
+  - name: tone_match
+    weight: 40
+    description: >
+      Does the output read like a friendly, benefit-forward SaaS landing page
+      line? The gold reference shows the target voice: conversational, second
+      person ("you"/"your"), concrete benefit named.
+    anchors:
+      0: "Sounds like the original engineering doc — dry, technical, jargon-heavy."
+      50: "Plainer than the source but still reads like documentation."
+      100: "Indistinguishable from a polished landing page headline."
+  - name: faithfulness
+    weight: 30
+    description: >
+      Does the rewrite preserve the factual content of the input? Omitting
+      important constraints (e.g. 'mid-cycle', 'authenticator app') is a
+      faithfulness failure even if the result reads well.
+    anchors:
+      0: "Contradicts or omits the core fact of the input."
+      50: "Captures the gist but drops an important qualifier."
+      100: "All key facts preserved in simpler language."
+  - name: brevity
+    weight: 30
+    description: >
+      Single sentence, no preamble, no Markdown, no quote wrappers, no
+      trailing explanation. One polished line.
+    anchors:
+      0: "Multiple sentences, headers, bullet points, or wraps output in quotes/code fences."
+      50: "Single sentence but with unnecessary filler."
+      100: "One tight sentence, no cruft."
