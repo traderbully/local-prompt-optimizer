@@ -1,0 +1,34 @@
+task_name: windows_file_ops_reliability_rubric
+mode: autonomous
+target_strategy: parallel_independent
+target_models:
+- slug: gemma-4-26b-local
+  provider: lmstudio
+  model_id: google/gemma-4-26b-a4b
+  base_url: http://localhost:1234/v1
+- slug: deepseek-v3-2
+  provider: openrouter
+  model_id: deepseek/deepseek-v3.2
+  base_url: http://localhost:1234/v1
+- slug: mistral-large-2512
+  provider: openrouter
+  model_id: mistralai/mistral-large-2512
+  base_url: http://localhost:1234/v1
+- slug: qwen3-235b-2507
+  provider: openrouter
+  model_id: qwen/qwen3-235b-a22b-2507
+  base_url: http://localhost:1234/v1
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-5
+  api_key_env: ANTHROPIC_API_KEY
+stop_conditions:
+  target_score: 95.0
+  max_iterations: 20
+  plateau_patience: 5
+  cost_cap_usd: 3.0
+metric_evolution:
+  enabled: true
+  require_user_approval: true
+output_type: json
+eval_concurrency: 2

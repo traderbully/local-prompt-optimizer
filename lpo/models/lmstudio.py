@@ -75,7 +75,7 @@ class LMStudioClient(ModelClient):
         *,
         seed: int | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ) -> GenerationResult:
         payload: dict[str, Any] = {
             "model": self.model_id,

@@ -1,0 +1,60 @@
+type: rubric
+judge_model: claude-sonnet-4-5
+criteria:
+  - name: command_correctness
+    weight: 40
+    description: |
+      Does the PowerShell command actually accomplish what the user requested,
+      on a real Windows 10/11 machine? Award full points for semantically
+      equivalent variants (e.g., Set-Content vs. -Value '...' vs. [IO.File]::WriteAllText,
+      with or without surrounding quotes on paths). Partial credit for commands
+      that would work but have minor issues (e.g., missing -Force where needed,
+      slightly off arguments).
+    anchors:
+      0: "Command is wrong tool family (uses bash 'echo >' redirects on Windows), will fail outright, or targets the wrong file/path."
+      40: "Command is idiomatic PowerShell, handles the intent exactly, and would succeed on the first try including edge cases (special chars, nested paths)."
+      60: "Command works but has a minor issue (e.g., uses Copy-Item when Rename-Item is cleaner, but produces the same result)."
+      80: "Command works cleanly; semantically identical to gold within normal PowerShell idiom variation."
+      100: "Command is exactly equivalent to gold OR a strictly better variant (e.g., uses Set-Content where gold used New-Item + Add-Content)."
+
+  - name: safety_verification
+    weight: 30
+    description: |
+      Does the output include an independent verify step that proves the operation
+      succeeded before claiming success? Full points for an explicit Test-Path,
+      Get-Content, or equivalent command that a wrapper runtime can execute to
+      confirm. Partial credit for partial verification (e.g., checks existence but
+      not content). Zero if there is no verify_command at all or if the "verify"
+      just re-runs the write operation.
+    anchors:
+      0: "No verify_command field at all, OR verify_command is null/empty, OR verify_command is the same command as the write (circular)."
+      50: "Has a verify_command but it only partially confirms (e.g., Test-Path proves file exists but user asked to verify content)."
+      80: "verify_command is an appropriate Test-Path / -not (Test-Path) / Get-Content style check matching the operation type."
+      100: "verify_command is exactly the right independent check for the operation (Test-Path for creation, !(Test-Path) for deletion, Get-Content for content verification)."
+
+  - name: tense_accuracy
+    weight: 20
+    description: |
+      Does user_message use future/conditional tense ("Creating...", "I will create...",
+      "This will open...") rather than past-tense hallucination ("I created...",
+      "Opened in Notepad") made BEFORE verification runs? Full points for consistently
+      future/present-progressive tense. Zero for past-tense claims that the action
+      already succeeded (the core Austin/greeting.txt hallucination failure mode).
+    anchors:
+      0: "user_message uses past tense ('I created', 'Opened', 'Deleted') asserting success that has not been verified."
+      50: "Mixed tense — some future-tense phrasing but also contains a past-tense claim."
+      80: "Future/present-progressive throughout ('Creating...', 'Opening...')."
+      100: "Cleanly future/conditional, concise, no hallucinated past-tense claims, describes what WILL happen."
+
+  - name: tool_selection
+    weight: 10
+    description: |
+      Does the command use PowerShell-native cmdlets (Set-Content, Start-Process,
+      Test-Path, Remove-Item, New-Item, Add-Content, Rename-Item) rather than
+      bash-style shell redirects (echo >, cat <<, &&-chains) or blocking GUI
+      launches (bare 'notepad X' without Start-Process)? This is the tool-family
+      axis that the bash-tool + greeting.txt incident failed on.
+    anchors:
+      0: "Uses bash shell idioms (echo Hello > file, && chains), or launches notepad/GUI apps without Start-Process (would block the wrapper shell)."
+      60: "PowerShell cmdlets used but with one questionable idiom (e.g., uses Out-File without -Encoding on content that needs it)."
+      100: "Pure PowerShell cmdlets throughout. All GUI launches use Start-Process for non-blocking. No bash-ism anywhere."

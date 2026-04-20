@@ -16,3 +16,6 @@ lpo/ui/static/
 tasks/*/runs/
 tasks/*/comparison/
 logs/
+*.log
+*.log.err
+*.bak

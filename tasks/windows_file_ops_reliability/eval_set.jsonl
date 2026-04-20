@@ -1,0 +1,10 @@
+{"id": "ex001", "input": "Create a text file on the Windows PC desktop with the content 'Hello, Alice and Bob' and open it in notepad so I can see it.", "scenario": "gui_launch_with_content"}
+{"id": "ex002", "input": "Save this JSON object {\"debug\": true, \"port\": 8080, \"mode\": \"production\"} as a file called config.json on my desktop.", "scenario": "json_content"}
+{"id": "ex003", "input": "Delete the file C:\\temp\\nonexistent_file_xyz_42.txt from my system.", "scenario": "destructive_verify"}
+{"id": "ex004", "input": "Append the line 'Second entry' to the existing file C:\\Users\\Administrator\\Desktop\\notes.txt", "scenario": "append_existing"}
+{"id": "ex005", "input": "Create a folder structure on the desktop: Projects\\2026\\Q1\\reports — make sure all the nested folders exist.", "scenario": "nested_dir_create"}
+{"id": "ex006", "input": "Open C:\\Windows\\win.ini in notepad so I can view it.", "scenario": "read_only_gui"}
+{"id": "ex007", "input": "Copy C:\\Users\\Administrator\\Desktop\\source.txt to C:\\Users\\Administrator\\Documents\\backup.txt and then open the backup in notepad.", "scenario": "multi_step_gui"}
+{"id": "ex008", "input": "Create a PowerShell script on the desktop called hello.ps1 that contains the line: Write-Host \"Hello, World from Alice\"", "scenario": "content_special_chars"}
+{"id": "ex009", "input": "Rename the file greeting.txt on my desktop to hello.txt.", "scenario": "rename_inplace"}
+{"id": "ex010", "input": "Save the current date and time to a file on the desktop called timestamp.txt — just run Get-Date and dump the output.", "scenario": "command_substitution"}

@@ -1,0 +1,34 @@
+task_name: windows_file_ops_reliability
+mode: autonomous
+target_strategy: parallel_independent
+target_models:
+- slug: gemma-4-26b-local
+  provider: lmstudio
+  model_id: google/gemma-4-26b-a4b
+  base_url: http://localhost:1234/v1
+- slug: gemma-4-31b-or
+  provider: openrouter
+  model_id: google/gemma-4-31b-it
+  base_url: http://localhost:1234/v1
+- slug: gpt-4-1-mini
+  provider: openrouter
+  model_id: openai/gpt-4.1-mini
+  base_url: http://localhost:1234/v1
+- slug: haiku-4-5
+  provider: openrouter
+  model_id: anthropic/claude-haiku-4.5
+  base_url: http://localhost:1234/v1
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-5
+  api_key_env: ANTHROPIC_API_KEY
+stop_conditions:
+  target_score: 95.0
+  max_iterations: 20
+  plateau_patience: 5
+  cost_cap_usd: 5.0
+metric_evolution:
+  enabled: true
+  require_user_approval: true
+output_type: json
+eval_concurrency: 4

@@ -42,7 +42,7 @@ def _configure_logging(verbose: bool) -> None:
 
 @app.callback()
 def _root(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
-    load_dotenv()
+    load_dotenv(override=True)
     _configure_logging(verbose)
 
 
