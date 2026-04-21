@@ -18,6 +18,10 @@ target_models:
   provider: openrouter
   model_id: qwen/qwen3-235b-a22b-2507
   base_url: http://localhost:1234/v1
+- slug: qwen3-6-35b-local
+  provider: lmstudio
+  model_id: qwen/qwen3.6-35b-a3b
+  base_url: http://localhost:1234/v1
 overseer_model:
   provider: anthropic
   model_id: claude-opus-4-5
