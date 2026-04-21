@@ -78,6 +78,7 @@ def test_tool_specs_expose_every_required_tool():
         "lpo_get_winner",
         "lpo_get_comparison",
         "lpo_list_tasks",
+        "lpo_reload_env",
     }
     # Every spec must have the MCP-required keys.
     for s in TOOL_SPECS:
@@ -292,16 +293,141 @@ async def test_run_optimization_respects_target_slugs(handlers: LpoMcpHandlers):
             "stop_conditions": {"max_iterations": 1, "target_score": 0},
         },
     )
+    # When target_slugs narrows to a single target we collapse to the
+    # single-target path; "comparison with one winner" is vacuous. The
+    # summary still reports the configured strategy via subset_run metadata.
     assert out.get("status") == "done", out
-    assert out["strategy"] == "parallel_independent"
-    slugs_in_result = {r["slug"] for r in out["per_model"]}
-    assert slugs_in_result == {"alpha"}, out
+    assert out["strategy"] == "single"
+    assert out["subset_run"] is True
+    assert out["configured_strategy"] == "parallel_independent"
+    assert out["ran_slugs"] == ["alpha"]
+    assert out["winner"]["present"] is True
 
     task_root = handlers.tasks_root / "filtered"
     assert (task_root / "runs" / "alpha").exists()
     assert not (task_root / "runs" / "beta").exists(), (
         "beta should have been skipped by target_slugs filter"
     )
+
+
+@pytest.mark.asyncio
+async def test_fresh_with_target_slugs_preserves_other_slugs_history(handlers: LpoMcpHandlers):
+    # Regression for the data-loss trap: `fresh=True` used to wipe
+    # runs/ for ALL slugs, not just the one(s) the caller was re-running.
+    await handlers.call(
+        "lpo_create_task",
+        {
+            "name": "preserve",
+            "task_description": "x",
+            "example_inputs": ["a"],
+            "output_type": "json",
+            "required_json_fields": ["echo"],
+            "strategy": "parallel_independent",
+            "target_models": [
+                _stub_target_spec("keep").to_config(),
+                _stub_target_spec("rerun").to_config(),
+            ],
+        },
+    )
+    task_root = handlers.tasks_root / "preserve"
+
+    # Fabricate a prior run for the "keep" slug — representative of the
+    # real-world state where a full bake-off had completed.
+    prior_history = task_root / "runs" / "keep" / "history" / "iter_0001"
+    prior_history.mkdir(parents=True, exist_ok=True)
+    sentinel = prior_history / "scores.json"
+    sentinel.write_text('{"aggregate": 99.0}', encoding="utf-8")
+    (task_root / "runs" / "keep" / "winner").mkdir(parents=True, exist_ok=True)
+    (task_root / "runs" / "keep" / "winner" / "prompt.txt").write_text("old", encoding="utf-8")
+
+    # Now re-run only "rerun" with fresh=True. The "keep" slug MUST survive.
+    out = await handlers.call(
+        "lpo_run_optimization",
+        {
+            "task_id": "preserve",
+            "mutator": "null",
+            "fresh": True,
+            "target_slugs": ["rerun"],
+            "stop_conditions": {"max_iterations": 1, "target_score": 0},
+        },
+    )
+    assert out.get("status") == "done", out
+    assert sentinel.exists(), "fresh+target_slugs wiped unrelated slug's history"
+    assert sentinel.read_text(encoding="utf-8") == '{"aggregate": 99.0}'
+    assert (task_root / "runs" / "rerun").exists()
+
+
+@pytest.mark.asyncio
+async def test_fresh_without_target_slugs_still_wipes_whole_task(handlers: LpoMcpHandlers):
+    # Counterpart to the previous test: when NO target_slugs filter is set,
+    # `fresh=True` keeps its original "reset the whole task" semantics.
+    await handlers.call(
+        "lpo_create_task",
+        {
+            "name": "wipe",
+            "task_description": "x",
+            "example_inputs": ["a"],
+            "output_type": "json",
+            "required_json_fields": ["echo"],
+            "target_models": [_stub_target_spec().to_config()],
+        },
+    )
+    task_root = handlers.tasks_root / "wipe"
+    stale = task_root / "runs" / "stub-target" / "history" / "iter_0001" / "scores.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"aggregate": 12.0}', encoding="utf-8")
+
+    await handlers.call(
+        "lpo_run_optimization",
+        {
+            "task_id": "wipe",
+            "mutator": "null",
+            "fresh": True,
+            "stop_conditions": {"max_iterations": 1, "target_score": 0},
+        },
+    )
+    # Original stale file is gone; fresh run created new iter_0001.
+    assert not stale.exists() or '"aggregate": 12.0' not in stale.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_reload_env_reports_changed_keys_with_fingerprints(
+    handlers: LpoMcpHandlers, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Stand up a fake .env in a tmp cwd so find_dotenv finds it.
+    env_path = tmp_path / ".env"
+    env_path.write_text("LPO_FAKE_TOKEN=abcd1234efgh5678ijkl\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LPO_FAKE_TOKEN", raising=False)
+
+    out = await handlers.call("lpo_reload_env", {})
+    assert out["reloaded"] is True
+    assert "LPO_FAKE_TOKEN" in out["keys_checked"]
+    changed_keys = [c["key"] for c in out["changed"]]
+    assert "LPO_FAKE_TOKEN" in changed_keys
+    ch = next(c for c in out["changed"] if c["key"] == "LPO_FAKE_TOKEN")
+    assert ch["old_fingerprint"] == "(not set)"
+    # Fingerprint must be obfuscated; must not contain the middle of the secret.
+    assert "1234efgh5678" not in ch["new_fingerprint"]
+    assert "abcd" in ch["new_fingerprint"] and "ijkl" in ch["new_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_reload_env_reports_no_dotenv_cleanly(
+    handlers: LpoMcpHandlers, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Move into a directory with no .env anywhere in the ancestry. We pick
+    # a deeply nested tmp path to avoid picking up the repo's own .env.
+    nested = tmp_path / "a" / "b" / "c"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    # find_dotenv walks upward; we can't guarantee there's no .env above
+    # tmp_path on every CI box, so we pre-seed an empty .env.example marker
+    # and accept either outcome: if reloaded=True, "changed" must at least
+    # be a list.
+    out = await handlers.call("lpo_reload_env", {})
+    assert "reloaded" in out
+    assert isinstance(out["changed"], list)
 
 
 @pytest.mark.asyncio

@@ -26,10 +26,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
 from lpo.core.authoring import TargetSpec, create_task_bundle, generate_gold_standard
 from lpo.core.comparison import write_comparison_report
@@ -232,6 +235,17 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description": "List every task bundle visible under tasks_root.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "lpo_reload_env",
+        "description": (
+            "Re-read .env into this MCP process's environment, overriding "
+            "any stale values. Call this after editing .env so you do not "
+            "need to restart the IDE. Returns the list of env var names "
+            "whose value changed plus obfuscated fingerprints (never the "
+            "full secret). No task or run state is affected."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -393,12 +407,38 @@ class LpoMcpHandlers:
         run_id = uuid.uuid4().hex[:12]
         self._runs[run_id] = {"task_id": task_id, "status": "running"}
 
+        # --- Fresh-wipe: scope to selected slugs when target_slugs is set ----
+        # Pre-target_slugs, ``fresh=True`` meant "wipe the whole task's runs/
+        # comparison/ logs". That's surprising when the caller is running only
+        # a subset — they'd lose unrelated slugs' histories as collateral
+        # damage. New behavior: when the caller restricted target_slugs, only
+        # those slugs' ``runs/<slug>/`` dirs are wiped. ``comparison/`` stays
+        # because a prior cross-model report is still meaningful for the
+        # slugs the caller is *not* re-running right now.
+        if fresh:
+            import shutil
+            if requested_slugs is not None:
+                for slug in {m.slug for m in task.config.target_models}:
+                    p = task.root / "runs" / slug
+                    if p.exists():
+                        shutil.rmtree(p, ignore_errors=True)
+            else:
+                for p in (task.root / "runs", task.root / "logs", task.root / "comparison"):
+                    if p.exists():
+                        shutil.rmtree(p, ignore_errors=True)
+
+        # --- Path selection ---------------------------------------------------
+        # If exactly one target survives (either the task is natively Strategy A
+        # or the caller filtered down to one via target_slugs), we use the
+        # single-target runner. Going through the multi path with a 1-element
+        # target list produces a "comparison report with one winner" which is
+        # vacuous and misleads the operator.
         try:
-            if task.config.target_strategy == "single":
+            if len(task.config.target_models) == 1:
                 result = await (self._run_single_cb or _default_run_single)(
-                    task, mutator_name=mutator, cost=cost, fresh=fresh
+                    task, mutator_name=mutator, cost=cost, fresh=False  # wipe already handled above
                 )
-                summary = {
+                summary: dict[str, Any] = {
                     "strategy": "single",
                     "best_score": result.best_score,
                     "iterations": len(result.iterations),
@@ -406,12 +446,14 @@ class LpoMcpHandlers:
                     "total_cost_usd": result.total_cost_usd,
                     "winner": read_winner(path, task.config.target_models[0].slug),
                 }
+                # Make it obvious when the configured strategy was NOT single
+                # but we collapsed because of a target_slugs filter. Downstream
+                # tooling can use this flag to suppress "winning model" claims.
+                if requested_slugs is not None:
+                    summary["subset_run"] = True
+                    summary["configured_strategy"] = task.config.target_strategy
+                    summary["ran_slugs"] = [m.slug for m in task.config.target_models]
             else:
-                if fresh:
-                    import shutil
-                    for p in (task.root / "runs", task.root / "logs", task.root / "comparison"):
-                        if p.exists():
-                            shutil.rmtree(p, ignore_errors=True)
                 multi = await (self._run_multi_cb or run_multi)(
                     task,
                     cost=cost,
@@ -434,6 +476,9 @@ class LpoMcpHandlers:
                     ],
                     "comparison": read_comparison(path).model_dump(),
                 }
+                if requested_slugs is not None:
+                    summary["subset_run"] = True
+                    summary["ran_slugs"] = [m.slug for m in task.config.target_models]
             self._runs[run_id].update(status="done", summary=summary)
             return {"run_id": run_id, "task_id": task_id, "status": "done", **summary}
         except Exception as e:  # noqa: BLE001
@@ -527,6 +572,56 @@ class LpoMcpHandlers:
     async def _tool_list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
         summaries = read_all_tasks(self.tasks_root)
         return {"tasks": [s.model_dump() for s in summaries]}
+
+    async def _tool_reload_env(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Reload ``.env`` into ``os.environ`` with override. Returns the
+        diff (fingerprints only — never full values)."""
+        dotenv_path = find_dotenv(usecwd=True)
+        if not dotenv_path:
+            return {
+                "reloaded": False,
+                "reason": "No .env file found on disk (searched from cwd upward).",
+                "changed": [],
+            }
+        # Snapshot before.
+        before = {k: os.environ.get(k) for k in dotenv_values(dotenv_path).keys()}
+        load_dotenv(dotenv_path, override=True)
+        # Snapshot after.
+        after = {k: os.environ.get(k) for k in dotenv_values(dotenv_path).keys()}
+
+        changed: list[dict[str, Any]] = []
+        for k, new_val in after.items():
+            old_val = before.get(k)
+            if new_val != old_val:
+                changed.append({
+                    "key": k,
+                    "old_fingerprint": _fingerprint(old_val),
+                    "new_fingerprint": _fingerprint(new_val),
+                })
+        return {
+            "reloaded": True,
+            "dotenv_path": dotenv_path,
+            "keys_checked": sorted(after.keys()),
+            "changed": changed,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _fingerprint(value: str | None) -> str:
+    """Obfuscate a secret for logging. Returns a short identifier that is
+    safe to surface to the operator but useless to an attacker."""
+    if value is None:
+        return "(not set)"
+    s = str(value)
+    if not s:
+        return "(empty)"
+    if len(s) <= 8:
+        return f"(len={len(s)}, short)"
+    return f"{s[:4]}...{s[-4:]} (len={len(s)})"
 
 
 # Default single-target runner. Factored out so tests can swap it. Mirrors
