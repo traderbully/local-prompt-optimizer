@@ -24,7 +24,7 @@ target_models:
   base_url: http://localhost:1234/v1
 overseer_model:
   provider: anthropic
-  model_id: claude-opus-4-5
+  model_id: claude-opus-4-7
   api_key_env: ANTHROPIC_API_KEY
 stop_conditions:
   target_score: 95.0
