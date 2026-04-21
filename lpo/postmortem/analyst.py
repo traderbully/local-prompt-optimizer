@@ -457,16 +457,80 @@ def _try_parse(
 
 
 def _strip_fences(raw: str) -> str:
-    """Tolerate a model that wrapped its JSON in a ``` fence despite
-    the instruction not to. Cheap recovery."""
+    """Extract the JSON object from a raw model response.
+
+    Handles three cases in order of preference:
+
+    1. Pure JSON (happy path) — returned as-is.
+    2. JSON wrapped in a markdown fence — strip the fence.
+    3. JSON embedded in prose ("Here's the analysis:" + object + trailing
+       commentary) — isolate the outermost balanced-brace object via a
+       string-aware scan.
+
+    Case 3 is the one :func:`_try_parse` used to fail on. Claude Opus
+    frequently prefaces structured output with a sentence or two of
+    narration despite the "respond with exactly one JSON object"
+    instruction; we recover instead of burning the single retry budget
+    on a cosmetic issue.
+    """
     s = raw.strip()
+
+    # Case 2: strip markdown fences first so case 3's scan works on the
+    # bare payload regardless of whether the fence itself had prose
+    # around it.
     if s.startswith("```"):
         first_newline = s.find("\n")
         if first_newline != -1:
             s = s[first_newline + 1 :]
         if s.endswith("```"):
-            s = s[: -3]
-    return s.strip()
+            s = s[:-3]
+        s = s.strip()
+
+    # Case 1: already a JSON object. Fast path.
+    if s.startswith("{") and s.endswith("}"):
+        return s
+
+    # Case 3: scan for the outermost JSON object. Track string state so a
+    # `{` inside a JSON string doesn't throw off the depth counter.
+    extracted = _extract_first_json_object(s)
+    return extracted if extracted is not None else s
+
+
+def _extract_first_json_object(s: str) -> str | None:
+    """Return the substring of ``s`` containing the first balanced
+    top-level JSON object, or None if no such object is found.
+
+    String-aware: ``{`` and ``}`` inside JSON strings (including escaped
+    quotes) don't count toward depth. This is the minimum needed to
+    reliably extract a model's structured reply from surrounding prose;
+    anything more elaborate and we'd pull in a real JSON parser.
+    """
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
 
 
 def _format_validation_error(e: ValidationError) -> str:

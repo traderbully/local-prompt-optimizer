@@ -75,10 +75,11 @@ async def test_reasoning_budget_retry_caps_at_limit():
 
 
 @pytest.mark.asyncio
-async def test_no_retry_when_reasoning_content_is_empty():
-    # Empty content AND empty reasoning → a tokenizer/server bug, not a CoT
-    # budget issue. Retrying with more tokens would not help; don't waste
-    # latency on a doomed retry.
+async def test_no_retry_when_finish_reason_is_not_length():
+    # Empty content with finish_reason=='stop' is a different failure mode
+    # (tokenizer/server bug, not a budget issue). Doubling max_tokens would
+    # not help and we don't want to burn latency on a doomed retry. Only
+    # finish_reason=='length' triggers the reasoning-budget auto-retry.
     client = LMStudioClient(model_id="broken")
     client._client.post = AsyncMock(return_value=_resp(
         _make({"content": "", "reasoning_content": ""}, finish="stop")
@@ -88,6 +89,44 @@ async def test_no_retry_when_reasoning_content_is_empty():
 
     assert gen.text == ""
     assert client._client.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_fires_when_reasoning_content_absent_but_finish_is_length():
+    """Apr 21 forensics case: Gemma 4-26b via LM Studio produced
+    completion_tokens == max_tokens (ate the ceiling) with empty `content`
+    AND empty `reasoning_content` — the server doesn't surface the hidden
+    CoT even though the model is internally reasoning. The OLD precondition
+    required ``reasoning.strip()`` to be non-empty and therefore skipped
+    the retry on exactly this case. The NEW precondition drops that
+    requirement: empty content + finish=length is sufficient evidence.
+    """
+    client = LMStudioClient(model_id="gemma-4-26b-local")
+    # First call mirrors what the windows_file_ops_reliability investigation
+    # found on disk: completion_tokens exactly at the 2048 ceiling, empty
+    # content, and — critically — NO reasoning_content surfaced by LM Studio.
+    first = _resp(_make(
+        {"content": "", "reasoning_content": ""},  # reasoning ABSENT
+        finish="length",
+        usage={"prompt_tokens": 332, "completion_tokens": 2048},
+    ))
+    # Retry at doubled budget succeeds: the model finally has enough room
+    # to emit actual JSON.
+    second = _resp(_make(
+        {"content": '{"command": "Set-Content -Path ...", "verify_command": "...", "user_message": "..."}'},
+        finish="stop",
+        usage={"prompt_tokens": 332, "completion_tokens": 350},
+    ))
+    client._client.post = AsyncMock(side_effect=[first, second])
+
+    gen = await client.generate("sys", "hi", max_tokens=2048)
+
+    # Recovered on the retry — the whole point of relaxing the precondition.
+    assert gen.text.startswith("{")
+    assert client._client.post.call_count == 2
+    # Second call doubled max_tokens per the retry contract.
+    second_payload = client._client.post.call_args_list[1].kwargs["json"]
+    assert second_payload["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio
@@ -123,3 +162,40 @@ async def test_normal_content_path_still_works():
     assert gen.prompt_tokens == 3
     assert gen.completion_tokens == 1
     assert client._client.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_and_reasoning_tokens_surface_on_result():
+    """Stage 7 forensic follow-up: both signals must be carried through
+    GenerationResult so iteration.py can persist them to outputs.jsonl.
+    """
+    client = LMStudioClient(model_id="reasoner")
+    client._client.post = AsyncMock(return_value=_resp(_make(
+        {"content": "done"},
+        finish="length",
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 500,
+            "completion_tokens_details": {"reasoning_tokens": 450},
+        },
+    )))
+
+    gen = await client.generate("sys", "hi", max_tokens=LMStudioClient.REASONING_RETRY_CAP)
+
+    assert gen.finish_reason == "length"
+    assert gen.reasoning_tokens == 450
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_none_when_provider_omits_details():
+    """When the server doesn't report completion_tokens_details, we
+    distinguish that from 'zero reasoning tokens' by returning None."""
+    client = LMStudioClient(model_id="plain")
+    client._client.post = AsyncMock(return_value=_resp(_make(
+        {"content": "plain"},
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
+    )))
+
+    gen = await client.generate("sys", "hi")
+    assert gen.reasoning_tokens is None
+    assert gen.finish_reason == "stop"

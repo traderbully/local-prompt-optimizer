@@ -156,23 +156,24 @@ class OpenRouterClient(ModelClient):
             messages=messages, seed=seed, temperature=temperature, max_tokens=max_tokens
         )
 
-        # Reasoning-budget auto-retry (mirrors LMStudioClient). Only retry
-        # once and only when the evidence is unambiguous: model produced CoT
-        # but no final content, and the server said it was truncated. Callers
-        # already above the cap get a single attempt — failure there reflects
-        # a model/config problem, not a budget problem.
+        # Reasoning-budget auto-retry (mirrors LMStudioClient). Retry
+        # once when empty content coincides with a length truncation and
+        # we're still below the cap. The `reasoning.strip()` precondition
+        # was dropped per Apr 21 forensics: some providers strip hidden
+        # CoT before returning, so requiring visible reasoning_content
+        # silently skipped the retry on exactly the models that needed
+        # it. See lpo/models/lmstudio.py for the full rationale.
         if (
             not text.strip()
-            and reasoning.strip()
             and finish == "length"
             and max_tokens < self.REASONING_RETRY_CAP
         ):
             bumped = min(max_tokens * 2, self.REASONING_RETRY_CAP)
             log.info(
-                "OpenRouter reasoning-budget auto-retry: model=%s produced %d chars "
-                "of reasoning_content but empty content at max_tokens=%d. Retrying "
-                "with max_tokens=%d (cap=%d).",
-                self.model_id, len(reasoning), max_tokens, bumped, self.REASONING_RETRY_CAP,
+                "OpenRouter reasoning-budget auto-retry: model=%s produced empty "
+                "content at max_tokens=%d (finish=length, reasoning_content=%d "
+                "chars). Retrying with max_tokens=%d (cap=%d).",
+                self.model_id, max_tokens, len(reasoning), bumped, self.REASONING_RETRY_CAP,
             )
             data, text, reasoning, finish, usage = await self._post_chat(
                 messages=messages, seed=seed, temperature=temperature, max_tokens=bumped,
@@ -209,6 +210,11 @@ class OpenRouterClient(ModelClient):
             model_id=self.model_id,
             provider=self.provider,
             raw=data,
+            # Forensic signals surfaced per Stage 7 follow-up. Reuse the
+            # LM Studio helpers — OpenRouter responses follow the same
+            # OpenAI-compatible shape for finish_reason + usage details.
+            finish_reason=_finish_as_str(finish),
+            reasoning_tokens=_or_reasoning_tokens(usage),
         )
 
     async def _post_chat(
@@ -272,3 +278,29 @@ class OpenRouterClient(ModelClient):
 def _backoff(attempt: int) -> float:
     base = 0.5 * (2**attempt)
     return base + random.uniform(0, 0.25)
+
+
+def _finish_as_str(v: Any) -> str | None:
+    """Same shape as lmstudio._as_str_or_none — kept as a tiny private
+    copy rather than a cross-module import so the two clients remain
+    independent. When the provider doesn't report finish_reason, None."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _or_reasoning_tokens(usage: dict[str, Any]) -> int | None:
+    """Mirrors lmstudio._reasoning_tokens — extract
+    ``usage.completion_tokens_details.reasoning_tokens`` when the
+    provider surfaces it; None otherwise."""
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    value = details.get("reasoning_tokens")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

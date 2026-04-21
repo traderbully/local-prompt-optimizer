@@ -94,22 +94,35 @@ class LMStudioClient(ModelClient):
         )
 
         # Reasoning-budget auto-retry: if the model produced *no* final
-        # content but did produce hidden CoT and was truncated on length,
-        # double max_tokens (up to the cap) and try once more. This is the
-        # canonical fix for the reasoning-model-ate-its-own-budget failure
-        # mode documented in README/Gotchas. One retry only to bound cost.
+        # content and hit the length ceiling, double max_tokens (up to the
+        # cap) and try once more. One retry only to bound cost.
+        #
+        # Precondition history: originally required `reasoning.strip()` to
+        # be non-empty on the theory that visible hidden-CoT was the only
+        # reliable signal of a reasoning model eating its budget. The
+        # Apr 21 forensic investigation on gemma-4-26b-local found the
+        # opposite: LM Studio's response for some models (Gemma 4 MoE
+        # among them) doesn't surface `reasoning_content` even when the
+        # model IS internally reasoning and consuming the ceiling. The old
+        # precondition therefore silently skipped the retry on exactly
+        # the cases where it was most needed. Empty content + length
+        # truncation is, on its own, sufficient evidence: doubling the
+        # budget is the right move regardless of whether we can see the
+        # hidden CoT. Pathological no-CoT cases (tokenizer bug producing
+        # empty output at length) escalate to the ERROR log below on the
+        # second attempt — same end state as before, minus the silent
+        # retry-skip that used to cause 3+ iterations of 0-scored outputs.
         if (
             not text.strip()
-            and reasoning.strip()
             and finish == "length"
             and max_tokens < self.REASONING_RETRY_CAP
         ):
             bumped = min(max_tokens * 2, self.REASONING_RETRY_CAP)
             log.info(
-                "LM Studio reasoning-budget auto-retry: model=%s produced %d chars of "
-                "reasoning_content but empty content at max_tokens=%d. Retrying with "
-                "max_tokens=%d (cap=%d).",
-                self.model_id, len(reasoning), max_tokens, bumped, self.REASONING_RETRY_CAP,
+                "LM Studio reasoning-budget auto-retry: model=%s produced empty "
+                "content at max_tokens=%d (finish=length, reasoning_content=%d "
+                "chars). Retrying with max_tokens=%d (cap=%d).",
+                self.model_id, max_tokens, len(reasoning), bumped, self.REASONING_RETRY_CAP,
             )
             data, text, reasoning, finish, usage = await self._post_chat(
                 messages=messages, seed=seed, temperature=temperature, max_tokens=bumped,
@@ -147,6 +160,8 @@ class LMStudioClient(ModelClient):
             model_id=self.model_id,
             provider=self.provider,
             raw=data,
+            finish_reason=_as_str_or_none(finish),
+            reasoning_tokens=_reasoning_tokens(usage),
         )
 
     async def _post_chat(
@@ -205,3 +220,35 @@ class LMStudioClient(ModelClient):
 def _backoff(attempt: int) -> float:
     base = 0.5 * (2**attempt)
     return base + random.uniform(0, 0.25)
+
+
+def _as_str_or_none(v: Any) -> str | None:
+    """Normalize a provider-reported finish_reason to a plain string or None.
+    LM Studio occasionally returns non-string sentinels; we keep the type
+    boring so downstream serializers don't have to worry."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _reasoning_tokens(usage: dict[str, Any]) -> int | None:
+    """Pull the hidden-CoT token count from the usage block, if present.
+
+    OpenAI-compatible servers (including LM Studio) nest this under
+    ``completion_tokens_details.reasoning_tokens``. Returns None when
+    the server didn't report one; 0 when it reported a zero. The
+    distinction matters for diagnosis: None means "server didn't
+    surface this" (our best-case guess is unknown); 0 means "model
+    claims to have done zero reasoning" (which on a reasoning model
+    is itself suspicious)."""
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    value = details.get("reasoning_tokens")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

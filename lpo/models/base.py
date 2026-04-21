@@ -29,6 +29,20 @@ class GenerationResult:
     model_id: str = ""
     provider: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    # Stage 7 forensic follow-up: surface the two signals that would have
+    # made the Apr 21 "gemma-4-26b-local empty outputs" investigation
+    # self-diagnosing. Both optional because not every provider exposes
+    # them consistently (some return stop_reason, some finish_reason;
+    # reasoning_tokens is only reported by reasoning-capable providers).
+    finish_reason: str | None = None
+    """Termination cause reported by the provider (``"stop"``, ``"length"``,
+    etc.). Persisted to ``outputs.jsonl`` so length-truncation failures are
+    visible without forensic re-reads. None when the provider didn't
+    report one (e.g. the stub client)."""
+    reasoning_tokens: int | None = None
+    """Hidden-CoT tokens the provider billed for, when reported in the
+    usage block (OpenAI-style `usage.completion_tokens_details.reasoning_tokens`).
+    None when not reported; 0 when reported as zero."""
 
 
 class ModelClient(ABC):

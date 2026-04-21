@@ -376,9 +376,11 @@ async def test_openrouter_reasoning_auto_retry_recovers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_openrouter_empty_content_without_reasoning_no_retry(monkeypatch, caplog):
-    # If reasoning_content is empty, a retry with more tokens would not
-    # help — we don't burn the budget on a doomed attempt.
+async def test_openrouter_empty_content_with_finish_stop_no_retry(monkeypatch, caplog):
+    # finish_reason=='stop' with empty content is a tokenizer/server bug,
+    # not a reasoning-budget issue. Doubling max_tokens wouldn't help and
+    # we don't want to burn latency on a doomed retry. Only finish='length'
+    # triggers the reasoning-budget auto-retry.
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     pricing = await _fake_pricing({"x/broken": (0.1, 0.2)})
     client = OpenRouterClient(model_id="x/broken", pricing=pricing)
@@ -402,6 +404,52 @@ async def test_openrouter_empty_content_without_reasoning_no_retry(monkeypatch, 
         r.levelname == "ERROR" and "no reasoning" in r.message
         for r in caplog.records
     ), [(r.levelname, r.message) for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_retry_fires_when_reasoning_absent_but_finish_is_length(monkeypatch):
+    """Parity with the LM Studio fix: an OpenRouter-routed reasoning model
+    whose provider strips hidden CoT from the response used to silently
+    skip the auto-retry because the old precondition required
+    ``reasoning.strip()`` to be non-empty. The new precondition drops that
+    and retries on empty-content + finish='length' alone. Verified against
+    the same failure pattern that hit gemma-4-26b-local on LM Studio.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    pricing = await _fake_pricing({"x/reasoner-no-cot": (0.1, 0.2)})
+    client = OpenRouterClient(model_id="x/reasoner-no-cot", pricing=pricing)
+
+    first = MagicMock()
+    first.status_code = 200
+    first.text = "ok"
+    first.json = MagicMock(return_value={
+        "choices": [{
+            "message": {"content": "", "reasoning_content": ""},  # CoT ABSENT
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 2048},
+    })
+
+    second = MagicMock()
+    second.status_code = 200
+    second.text = "ok"
+    second.json = MagicMock(return_value={
+        "choices": [{
+            "message": {"content": '{"ok": true}'},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+    })
+
+    client._client.post = AsyncMock(side_effect=[first, second])
+
+    gen = await client.generate("sys", "x", max_tokens=2048)
+
+    assert gen.text == '{"ok": true}'
+    assert client._client.post.call_count == 2
+    # Second call used doubled max_tokens per the retry contract.
+    second_payload = client._client.post.call_args_list[1].kwargs["json"]
+    assert second_payload["max_tokens"] == 4096
 
 
 # ---------------------------------------------------------------------------

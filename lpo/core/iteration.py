@@ -83,6 +83,14 @@ class IterationRunner:
             "prompt_tokens": gen.prompt_tokens,
             "completion_tokens": gen.completion_tokens,
             "latency_s": round(gen_latency, 4),
+            # Stage 7 forensic follow-up: surface the two signals that
+            # would have made the Apr 21 empty-output investigation
+            # self-diagnosing. Kept as top-level fields (not nested) so
+            # `jq` / `grep` against outputs.jsonl works without path
+            # navigation. Null when the provider didn't report them
+            # (e.g. stub client, Anthropic's different naming).
+            "finish_reason": gen.finish_reason,
+            "reasoning_tokens": gen.reasoning_tokens,
         }
 
     async def run(

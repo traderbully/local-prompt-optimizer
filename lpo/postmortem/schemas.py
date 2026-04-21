@@ -72,9 +72,14 @@ class Evidence(BaseModel):
     The Apr 21 review made this non-optional: no finding may float
     without at least one iteration, one example, and a score breakdown
     that maps examples to per-iteration scores.
+
+    ``extra='ignore'`` because real Analyst outputs tend to carry
+    narration fields (``notes``, ``observation``) we don't need but
+    shouldn't reject. The *positive* invariants (iterations + example_ids
+    + score_breakdown non-empty and cross-consistent) are what matters.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     iterations: list[int] = Field(
         ...,
@@ -157,9 +162,16 @@ class Evidence(BaseModel):
 
 
 class Finding(BaseModel):
-    """A single structured diagnosis item. See STAGE_8_DESIGN.md §4."""
+    """A single structured diagnosis item. See STAGE_8_DESIGN.md §4.
 
-    model_config = ConfigDict(extra="forbid")
+    ``extra='ignore'`` because Claude Opus reliably adds natural fields
+    the schema doesn't name (``affected_scenarios``, ``priority``,
+    ``confidence_rationale``, etc.). Those enrich the narrative but don't
+    affect the decision gate; rejecting them just burns the Analyst's
+    single retry budget on cosmetic re-emits.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(..., description="Stable ID of the form 'F<n>', e.g. 'F1'.")
     type: FindingType
@@ -208,7 +220,7 @@ class ExpectedImpact(BaseModel):
     as ``global_`` in Python.
     """
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     global_: tuple[float, float] | None = Field(default=None, alias="global")
     remediation: tuple[float, float] | None = None
@@ -220,9 +232,13 @@ class Intervention(BaseModel):
     The ``patch`` field carries a type-specific payload. Rather than use a
     discriminated union (which complicates the JSON the Analyst has to emit),
     we validate the payload's shape per-type in :meth:`_validate_patch_shape`.
+
+    ``extra='ignore'`` at the Intervention level; the ``patch`` dict itself
+    is typed as ``dict[str, Any]`` and never had extra-forbid in the first
+    place (patches need to carry arbitrary type-specific keys).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(..., description="Stable ID of the form 'I<n>'.")
     type: InterventionType
@@ -320,9 +336,12 @@ class Intervention(BaseModel):
 
 
 class Diagnosis(BaseModel):
-    """Analyst output: findings + bird's-eye observations."""
+    """Analyst output: findings + bird's-eye observations.
 
-    model_config = ConfigDict(extra="forbid")
+    ``extra='ignore'`` (Analyst-emitted).
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     findings: list[Finding] = Field(..., min_length=1)
     metric_observations: list[str] = Field(default_factory=list)
@@ -343,9 +362,12 @@ class Diagnosis(BaseModel):
 
 
 class Proposal(BaseModel):
-    """Planner output: concrete interventions + human-review summary."""
+    """Planner output: concrete interventions + human-review summary.
 
-    model_config = ConfigDict(extra="forbid")
+    ``extra='ignore'`` (Analyst-emitted).
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     interventions: list[Intervention] = Field(..., min_length=1)
     rationale: str = Field(..., min_length=1)
@@ -365,9 +387,13 @@ class PostmortemPlan(BaseModel):
     Cross-referential consistency (every intervention.fixes[i] maps to a
     real finding) is enforced here, not on the pieces in isolation, because
     the constraint spans both models.
+
+    ``extra='ignore'`` because the Analyst sometimes wraps its output in
+    a container with keys like ``version``, ``notes``, or ``run_id``.
+    These don't affect behavior; drop them silently.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     diagnosis: Diagnosis
     proposal: Proposal

@@ -128,3 +128,17 @@ async def test_atomic_writes_produce_expected_files(tmp_path):
     assert (iter1 / "decision.json").exists()
     scores = json.loads((iter1 / "scores.json").read_text())
     assert scores["aggregate"] == pytest.approx(100.0)
+
+    # Stage 7 forensic follow-up: every row in outputs.jsonl must carry
+    # finish_reason and reasoning_tokens (both may be null for the stub
+    # client, but the KEYS must be present so operators can grep for
+    # truncation patterns without forensic re-runs).
+    rows = [
+        json.loads(line)
+        for line in (iter1 / "outputs.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows, "expected at least one output row"
+    for row in rows:
+        assert "finish_reason" in row
+        assert "reasoning_tokens" in row
