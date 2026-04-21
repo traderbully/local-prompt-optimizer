@@ -157,7 +157,7 @@ rules:
 
 ### Headless-first, MCP-native
 
-LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live run monitoring, manual-mode feedback, and winner export. But the UI is strictly optional. The same engine is exposed as an **MCP stdio server** with eight tools:
+LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live run monitoring, manual-mode feedback, and winner export. But the UI is strictly optional. The same engine is exposed as an **MCP stdio server** with nine tools:
 
 - `lpo_create_task` — author a task bundle from a description and inputs
 - `lpo_generate_gold_standard` — fill in reference outputs (routable through OpenRouter via `GOLD_STANDARD_PROVIDER=openrouter`; see `.env.example`)
@@ -167,14 +167,44 @@ LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live ru
 - `lpo_get_comparison` — cross-model report for Strategies B and C
 - `lpo_list_tasks` — discover bundles under a tasks root
 - `lpo_reload_env` — re-read `.env` into the running MCP process (fingerprinted diff, no restart required after key rotation)
+- `lpo_run_postmortem` — **Stage 8** — opt-in postmortem diagnosis + targeted-intervention retry after a main ratchet run (see below)
 
 Register LPO once in Windsurf or Claude Desktop and you can drive the entire optimization pipeline from agent chat: *"Create an LPO task that writes email subject lines, generate the gold standard, run it, and tell me the winning prompt."* The agent does every step, end-to-end, without ever leaving the conversation.
+
+### Stage 8 — postmortem analysis & remediation (new)
+
+The Overseer is iteration-local: it reacts to one iteration's scores at a time. That's fine for local refinement but structurally blind to bird's-eye patterns — a whole scenario class scoring 0 because the prompt has no rule for content escaping, a metric shape that gives uniform credit across examples, a local optimum the Overseer kept drifting toward. **Stage 8** adds a dedicated postmortem phase that runs *after* the main ratchet terminates, reads the full run artifacts with a clean context, and emits an evidence-backed diagnosis + targeted remediation.
+
+Full design in [`STAGE_8_DESIGN.md`](./STAGE_8_DESIGN.md). Key invariants from the Apr 21 review:
+
+- **Opt-in only.** Never auto-invoked. Run via the MCP tool `lpo_run_postmortem` or the CLI `lpo postmortem <task_dir>`.
+- **Separate cost budget.** `config.yaml: postmortem.cost_cap_usd` (default `$2.50`) — independent of the task's own `cost_cap_usd`.
+- **Evidence invariant.** Every finding must cite concrete iteration indices, example IDs, and a score breakdown. Every intervention must reference the finding IDs it addresses. Schema-enforced; free-floating narrative is rejected.
+- **Metric changes are always human-approval.** The decision gate can auto-commit `prompt_patch` and `seed_reset` interventions when all three AND-semantics thresholds hold; `metric_patch`, `eval_addition`, and `model_swap_suggestion` are advisory-only regardless of confidence.
+- **Goodhart guard.** The focused validation retry runs against the *full* eval set so regressions on previously-passing scenarios kill an otherwise-promising intervention.
+
+Typical agent-chat usage:
+
+```
+User:   "Run a postmortem on example_rubric with the lms target."
+Agent:  [calls lpo_run_postmortem(task_id="example_rubric", slug="lms")]
+Agent:  "Outcome: accepted. Applied I1 (prompt_patch, confidence 0.88)
+         targeting F1 (scenario_blindspot: content escaping). Post-retry
+         score 60.0 (+20.0 global, +40.0 remediation, 0.0 regression).
+         Old winner preserved at runs/lms/winner.pre_postmortem/."
+```
+
+Or CLI:
+
+```powershell
+lpo postmortem tasks\example_rubric --slug lms --mode autonomous
+```
 
 ---
 
 ## Status
 
-**Stage 7 (current) — operational hardening.** On top of the Stage-1-through-6 engine + scoring + Overseer + multi-target + web UI + MCP surface, Stage 7 addresses the rough edges surfaced by real bake-offs: scoped `fresh` wipes that don't destroy unrelated slugs' history, single-target-subset runs that collapse to the single-target path (no vacuous "winner of one" reports), enriched 401 auth diagnostics with key fingerprints and `.env`-vs-shell drift detection, reasoning-budget auto-retry across both LM Studio and OpenRouter, empty-content logging escalated to ERROR, a `lpo_reload_env` MCP tool for key rotation without IDE restart, and a pluggable Gold Standard Source that can route through OpenRouter for operators without direct Anthropic billing. 138 tests, <7 s. Remaining polish (deterministic seed control, scenario weighting, dashboard refinements) tracks [`LPO_SDP.md`](./LPO_SDP.md) §10.
+**Stage 8 (current) — postmortem analysis & remediation.** Stage 8 adds a post-ratchet diagnostic phase: a frontier-model Analyst reads the full run artifacts (task description, eval set, gold standard, metric, every iteration's prompt + outputs + scores + Overseer analysis) and emits a validated `PostmortemPlan` with evidence-backed findings and finding-referenced interventions. In autonomous mode, a focused validation retry measures the patched prompt against the full eval set and an AND-semantics decision gate (global Δ ≥ 5, remediation Δ ≥ 15, regression ≤ 3 — all configurable) either commits the patch and promotes a new winner with `source: "postmortem"` provenance, or rejects it with the original winner untouched. Stage 7 operational hardening (fresh-wipe scoping, single-target collapse, enriched 401 diagnostics, reasoning-budget auto-retry, pluggable Gold Standard) is also in place. 254 tests, ~7 s.
 
 ---
 

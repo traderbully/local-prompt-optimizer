@@ -182,6 +182,120 @@ def _pick_target(task: TaskBundle, slug: str | None):
     raise typer.BadParameter(f"No target model with slug {slug!r} in {task.root / 'config.yaml'}")
 
 
+@app.command()
+def postmortem(
+    task_dir: Path = typer.Argument(..., help="Path to task bundle directory"),
+    slug: str | None = typer.Option(
+        None, "--slug", "-s",
+        help="Target slug whose run to analyze. Defaults to the first target_model in config.yaml.",
+    ),
+    mode: str = typer.Option(
+        "propose_only",
+        "--mode",
+        help=(
+            "propose_only (default): diagnose + proposal, no retry, no prompt changes. "
+            "autonomous: run the focused validation retry and auto-commit prompt/seed "
+            "interventions that clear all three thresholds."
+        ),
+    ),
+    allow_on_cost_cap: bool = typer.Option(
+        False,
+        "--allow-on-cost-cap",
+        help="Run even when the main ratchet terminated on cost_cap (skipped by default per design §9).",
+    ),
+) -> None:
+    """Run the Stage 8 postmortem phase on a completed task run.
+
+    Opt-in only (never auto-runs after ``lpo run``). Uses a separate cost
+    budget — ``config.yaml: postmortem.cost_cap_usd``, default $2.50. All
+    artifacts land under ``runs/<slug>/postmortem/``.
+    """
+    if mode not in ("propose_only", "autonomous"):
+        raise typer.BadParameter(f"--mode must be 'propose_only' or 'autonomous', got {mode!r}")
+
+    task = TaskBundle.load(task_dir)
+    target = _pick_target(task, slug)
+
+    from lpo.core.cost import CostTracker
+    from lpo.models.anthropic_client import AnthropicClient
+    from lpo.postmortem.runner import run_postmortem
+
+    cost = CostTracker()
+    analyst_model = task.config.postmortem.analyst_model_id
+    analyst = AnthropicClient(model_id=analyst_model, cost_tracker=cost)
+
+    async def _go() -> None:
+        try:
+            result = await run_postmortem(
+                task_dir,
+                slug=target.slug,
+                analyst_client=analyst,
+                mode=mode,
+                cost=cost,
+                allow_on_cost_cap=allow_on_cost_cap,
+            )
+        finally:
+            await analyst.aclose()
+        _print_postmortem_summary(result)
+
+    asyncio.run(_go())
+
+
+def _print_postmortem_summary(result) -> None:
+    """Render a :class:`PostmortemResult` as a Rich summary. Full artifacts
+    live on disk; this is just the headline view."""
+    decision = result.decision
+    plan = result.plan
+    console.rule(f"Postmortem: {decision.outcome}")
+
+    console.print(f"[bold]Mode:[/] {result.mode}")
+    console.print(f"[bold]Analyst model:[/] {result.analyst_model_id} (retries: {result.analyst_retries})")
+    console.print(f"[bold]Cost:[/] ${result.total_cost_usd:.4f}")
+    console.print(f"[bold]Artifacts:[/] {result.postmortem_root}")
+    console.print()
+
+    # Findings table.
+    f_table = Table("ID", "Type", "Severity", "Confidence", "Summary", title="Findings")
+    for f in plan.diagnosis.findings:
+        f_table.add_row(
+            f.id, f.type, f.severity, f"{f.confidence:.2f}", f.summary[:60],
+        )
+    console.print(f_table)
+
+    # Interventions table.
+    i_table = Table(
+        "ID", "Type", "Fixes", "Conf.", "Applied?", "Summary",
+        title="Interventions",
+    )
+    for i in plan.proposal.interventions:
+        applied = (
+            "auto-applied" if i.id in decision.auto_applied_intervention_ids
+            else ("report-only" if i.id in decision.report_only_intervention_ids else "skipped")
+        )
+        i_table.add_row(
+            i.id, i.type, ", ".join(i.fixes), f"{i.confidence:.2f}",
+            applied, i.summary[:50],
+        )
+    console.print(i_table)
+
+    # Deltas (retry only).
+    if decision.deltas is not None:
+        console.print()
+        console.print(
+            f"[bold]Deltas:[/] global={decision.deltas.global_delta:+.2f}  "
+            f"remediation={decision.deltas.remediation_delta:+.2f}  "
+            f"regression={decision.deltas.max_scenario_regression:.2f}"
+        )
+        console.print(
+            f"         pre={decision.deltas.pre_best_score:.2f} "
+            f"post={decision.deltas.post_best_score:.2f}"
+        )
+
+    console.print()
+    console.print("[bold]Decision rationale:[/]")
+    console.print(decision.rationale)
+
+
 @task_app.command("list")
 def task_list(root: Path = typer.Argument(Path("tasks"))) -> None:
     """List task bundles under a directory."""

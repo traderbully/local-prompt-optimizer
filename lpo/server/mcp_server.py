@@ -248,6 +248,56 @@ TOOL_SPECS: list[dict[str, Any]] = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "lpo_run_postmortem",
+        "description": (
+            "Run the Stage 8 postmortem phase on a completed task run: a "
+            "frontier-model Analyst reads the full run artifacts, proposes "
+            "structured interventions (findings with evidence, interventions "
+            "with provenance), and — in autonomous mode — runs a focused "
+            "validation retry and auto-commits prompt/seed changes that "
+            "clear three AND-semantics thresholds. Metric patches, eval "
+            "additions, and model-swap suggestions are always surfaced for "
+            "human review per the Apr 21 design review. Opt-in only; not "
+            "invoked automatically at the end of lpo_run_optimization. "
+            "Uses a separate cost budget (config.yaml: postmortem.cost_cap_usd, "
+            "default $2.50). Requires ANTHROPIC_API_KEY."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "slug": {
+                    "type": "string",
+                    "description": (
+                        "Target slug whose run to analyze. Defaults to the "
+                        "first target_model in config.yaml."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["autonomous", "propose_only"],
+                    "default": "autonomous",
+                    "description": (
+                        "autonomous: diagnose -> patch -> retry -> decide; "
+                        "may auto-commit prompt/seed changes on threshold. "
+                        "propose_only: stop after writing diagnosis + proposal."
+                    ),
+                },
+                "allow_on_cost_cap": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Run the postmortem even when the main ratchet "
+                        "terminated on cost_cap. Default False per design "
+                        "\u00a79: if the main loop died on budget the operator "
+                        "should fix the budget first."
+                    ),
+                },
+            },
+            "required": ["task_id"],
+        },
+    },
 ]
 
 
@@ -274,6 +324,7 @@ class LpoMcpHandlers:
     # defaults.
     _run_single_cb: Any = None
     _run_multi_cb: Any = None
+    _run_postmortem_cb: Any = None  # Stage 8 test seam; see _tool_run_postmortem
 
     # --- dispatch ---------------------------------------------------------
 
@@ -574,6 +625,87 @@ class LpoMcpHandlers:
     async def _tool_list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
         summaries = read_all_tasks(self.tasks_root)
         return {"tasks": [s.model_dump() for s in summaries]}
+
+    async def _tool_run_postmortem(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Stage 8 opt-in postmortem. See lpo.postmortem.runner.run_postmortem.
+
+        The real Anthropic-backed Analyst client is constructed here; tests
+        inject a stub via ``_run_postmortem_cb`` on the handler, which
+        bypasses the client-build path entirely and returns a pre-made
+        :class:`PostmortemResult`.
+        """
+        task_id = args["task_id"]
+        path = self._resolve(task_id)
+        task = TaskBundle.load(path)
+
+        slug = args.get("slug") or task.config.target_models[0].slug
+        mode = args.get("mode", "autonomous")
+        allow_on_cost_cap = bool(args.get("allow_on_cost_cap", False))
+
+        # Test seam.
+        if self._run_postmortem_cb is not None:
+            result = await self._run_postmortem_cb(
+                task_root=path,
+                slug=slug,
+                mode=mode,
+                allow_on_cost_cap=allow_on_cost_cap,
+                task=task,
+            )
+            return self._summarize_postmortem_result(result)
+
+        # Production path: real AnthropicClient as Analyst.
+        from lpo.core.cost import CostTracker
+        from lpo.models.anthropic_client import AnthropicClient
+        from lpo.postmortem.runner import run_postmortem
+
+        cost = CostTracker()
+        analyst_model = task.config.postmortem.analyst_model_id
+        analyst_client = AnthropicClient(model_id=analyst_model, cost_tracker=cost)
+        try:
+            result = await run_postmortem(
+                path,
+                slug=slug,
+                analyst_client=analyst_client,
+                mode=mode,
+                cost=cost,
+                allow_on_cost_cap=allow_on_cost_cap,
+            )
+        finally:
+            await analyst_client.aclose()
+
+        return self._summarize_postmortem_result(result)
+
+    def _summarize_postmortem_result(self, result: Any) -> dict[str, Any]:
+        """Convert a :class:`PostmortemResult` into a JSON-safe MCP payload.
+
+        Keeps the envelope small — full artifacts live on disk. Callers
+        read them via the path in ``postmortem_root`` when they want
+        detail beyond the headline numbers.
+        """
+        decision = result.decision
+        plan = result.plan
+        payload: dict[str, Any] = {
+            "outcome": decision.outcome,
+            "mode": result.mode,
+            "postmortem_root": str(result.postmortem_root),
+            "analyst_model_id": result.analyst_model_id,
+            "analyst_retries": result.analyst_retries,
+            "total_cost_usd": round(result.total_cost_usd, 4),
+            "finding_ids": [f.id for f in plan.diagnosis.findings],
+            "auto_applied_intervention_ids": list(decision.auto_applied_intervention_ids),
+            "report_only_intervention_ids": list(decision.report_only_intervention_ids),
+            "rationale": decision.rationale,
+        }
+        if decision.deltas is not None:
+            payload["deltas"] = {
+                "global": decision.deltas.global_delta,
+                "remediation": decision.deltas.remediation_delta,
+                "max_scenario_regression": decision.deltas.max_scenario_regression,
+                "pre_best_score": decision.deltas.pre_best_score,
+                "post_best_score": decision.deltas.post_best_score,
+                "retry_iterations_run": decision.deltas.retry_iterations_run,
+            }
+        return payload
 
     async def _tool_reload_env(self, args: dict[str, Any]) -> dict[str, Any]:
         """Reload ``.env`` into ``os.environ`` with override. Returns the

@@ -79,6 +79,7 @@ def test_tool_specs_expose_every_required_tool():
         "lpo_get_comparison",
         "lpo_list_tasks",
         "lpo_reload_env",
+        "lpo_run_postmortem",
     }
     # Every spec must have the MCP-required keys.
     for s in TOOL_SPECS:
