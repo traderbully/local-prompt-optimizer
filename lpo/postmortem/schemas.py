@@ -513,7 +513,7 @@ class PostmortemConfig(BaseModel):
     min_confidence_prompt_patch: float = Field(default=0.70, ge=0.0, le=1.0)
     min_confidence_seed_reset: float = Field(default=0.85, ge=0.0, le=1.0)
 
-    analyst_model_id: str = Field(default="claude-opus-4-5")
+    analyst_model_id: str = Field(default="claude-opus-4-7")
 
     @model_validator(mode="after")
     def _threshold_ordering(self) -> "PostmortemConfig":

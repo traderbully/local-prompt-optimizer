@@ -165,8 +165,8 @@ def create_task_bundle(
     mode: Literal["autonomous", "supervised", "manual", "visual"] = "autonomous",
     required_json_fields: list[str] | None = None,
     seed_prompt: str | None = None,
-    judge_model: str = "claude-opus-4-5",
-    overseer_model: str = "claude-opus-4-5",
+    judge_model: str = "claude-opus-4-7",
+    overseer_model: str = "claude-opus-4-7",
     scenario_tags: list[str | None] | None = None,
     overwrite: bool = False,
 ) -> Path:

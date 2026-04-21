@@ -100,7 +100,7 @@ class TargetModelConfig(BaseModel):
 
 class OverseerModelConfig(BaseModel):
     provider: Literal["anthropic"] = "anthropic"
-    model_id: str = "claude-opus-4-5"
+    model_id: str = "claude-opus-4-7"
     api_key_env: str = "ANTHROPIC_API_KEY"
 
 
