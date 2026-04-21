@@ -63,6 +63,66 @@ def test_exact_match_string_fallback_mismatch_shows_diff():
     assert "expected" in r.detail and "got" in r.detail
 
 
+# ---------------------------------------------------------------------------
+# PowerShell verify_command semantic equivalence (Stage-8 Analyst I3).
+# `-not (Test-Path 'X')` and `Test-Path 'X'` are semantically equivalent
+# verifications of successful deletion (inverted boolean conventions).
+# The normalizer must make them compare equal, symmetrically.
+# ---------------------------------------------------------------------------
+
+
+def test_ps_not_testpath_equals_bare_testpath():
+    """Model emits `-not (Test-Path X)`; gold uses bare `Test-Path X`."""
+    gold = GoldRecord(
+        id="x",
+        output={
+            "command": "Remove-Item 'C:\\temp\\f.txt'",
+            "verify_command": "Test-Path 'C:\\temp\\f.txt'",
+        },
+    )
+    out = (
+        '{"command": "Remove-Item \'C:\\\\temp\\\\f.txt\'", '
+        '"verify_command": "-not (Test-Path \'C:\\\\temp\\\\f.txt\')"}'
+    )
+    r = check_exact_match_against_gold(out, gold, _rec(), None)
+    assert r.score == 100.0, r.detail
+
+
+def test_ps_bare_testpath_equals_not_wrapped_in_gold():
+    """Symmetric case: gold uses `-not (Test-Path X)`; model emits bare."""
+    gold = GoldRecord(
+        id="x",
+        output={"verify_command": "-not (Test-Path 'C:\\temp\\f.txt')"},
+    )
+    r = check_exact_match_against_gold(
+        '{"verify_command": "Test-Path \'C:\\\\temp\\\\f.txt\'"}',
+        gold, _rec(), None,
+    )
+    assert r.score == 100.0, r.detail
+
+
+def test_ps_normalization_does_not_cross_paths():
+    """Normalization must only collapse `-not (Test-Path X)` to `Test-Path X`.
+    Paths that differ must still mismatch."""
+    gold = GoldRecord(id="x", output={"verify_command": "Test-Path 'C:\\a'"})
+    r = check_exact_match_against_gold(
+        '{"verify_command": "-not (Test-Path \'C:\\\\b\')"}',
+        gold, _rec(), None,
+    )
+    assert r.score == 0.0
+
+
+def test_ps_normalization_ignores_unrelated_strings():
+    """A field that *contains* the words but isn't the whole-value pattern
+    must not be normalized. Regression against over-eager matching."""
+    gold = GoldRecord(id="x", output={"user_message": "Will run Test-Path to verify."})
+    r = check_exact_match_against_gold(
+        '{"user_message": "Will not run -not (Test-Path ...) here."}',
+        gold, _rec(), None,
+    )
+    assert r.score == 0.0
+
+
 @pytest.mark.asyncio
 async def test_deterministic_scorer_rationale_includes_field_diff():
     """The rationale surfaced to the Overseer must show which field failed."""

@@ -75,6 +75,30 @@ def _short(value: Any, max_len: int = 60) -> str:
     return s
 
 
+# PowerShell verify-command semantic-equivalence normalizer. Motivated by
+# Stage-8 Analyst finding I3 on windows_file_ops_reliability: deletion
+# scenarios have two equally-valid verify forms —
+#   (a) `Test-Path 'X'`          (returns False on successful deletion)
+#   (b) `-not (Test-Path 'X')`   (returns True on successful deletion)
+# Both verify the same thing with inverted boolean semantics. Without
+# this normalizer the exact-string metric penalised whichever form the
+# gold didn't happen to pick. The regex is intentionally narrow: it only
+# matches when the entire value is `-not ( Test-Path ... )`, so non-
+# PowerShell fields are unaffected. Applied symmetrically to both output
+# and gold in :func:`check_exact_match_against_gold`.
+_PS_NOT_TESTPATH_RE = re.compile(
+    r"^\s*-not\s*\(\s*(Test-Path\b.*?)\s*\)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_ps_testpath(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    m = _PS_NOT_TESTPATH_RE.match(value)
+    return m.group(1).strip() if m else value
+
+
 # ---------------------------------------------------------------------------
 # Built-in checks
 # ---------------------------------------------------------------------------
@@ -138,7 +162,14 @@ def check_exact_match_against_gold(
             if k not in out_obj:
                 missing.append(k)
                 continue
-            if out_obj[k] == expected:
+            # Apply PowerShell Test-Path normalization symmetrically. See the
+            # header comment on _PS_NOT_TESTPATH_RE for why this is safe:
+            # values that don't match the narrow `-not ( Test-Path ... )`
+            # shape pass through unchanged, so no other field / task is
+            # affected. Stage-8 Analyst finding I3 (2026-04-21).
+            expected_norm = _normalize_ps_testpath(expected)
+            actual_norm = _normalize_ps_testpath(out_obj[k])
+            if actual_norm == expected_norm:
                 matches.append(k)
             else:
                 mismatches.append(
