@@ -7,12 +7,16 @@ can meter billable calls.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from anthropic import APIError, AsyncAnthropic
+
+log = logging.getLogger("lpo.models.anthropic_client")
 
 try:
     # dotenv is a runtime dep (pulled in by lpo.cli). Best-effort import so
@@ -51,7 +55,8 @@ class AnthropicClient:
         model_id: str,
         api_key_env: str = "ANTHROPIC_API_KEY",
         max_tokens: int = 4096,
-        timeout_s: float = 120.0,
+        timeout_s: float = 90.0,
+        max_retries: int = 2,
         cost_tracker: CostTracker | None = None,
     ) -> None:
         key = os.environ.get(api_key_env)
@@ -60,12 +65,24 @@ class AnthropicClient:
                 f"Anthropic API key not found in env var {api_key_env!r}. "
                 "Copy .env.example to .env and set ANTHROPIC_API_KEY."
             )
+        if timeout_s <= 0:
+            raise ValueError(f"timeout_s must be positive, got {timeout_s!r}")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries!r}")
         self.model_id = model_id
         self.max_tokens = max_tokens
         self.cost = cost_tracker or CostTracker()
         self._api_key_env = api_key_env
         self._key_snapshot = key
-        self._client = AsyncAnthropic(api_key=key, timeout=timeout_s)
+        self._timeout_s = timeout_s
+        self._max_retries = max_retries
+        # Disable the SDK's own retry loop — we enforce wall-clock timeout via
+        # asyncio.wait_for at the call site and handle retries ourselves. If
+        # we left the SDK default (max_retries=2), a single stuck connection
+        # could silently burn ``timeout_s * 3`` before surfacing, making the
+        # configured timeout effectively useless. See the 2026-04-21 overseer
+        # hang incident (>8 min blocked on a single messages.create call).
+        self._client = AsyncAnthropic(api_key=key, timeout=timeout_s, max_retries=0)
         # Newer Anthropic models (e.g. claude-opus-4-7) reject ``temperature``.
         # We discover that lazily on the first call and cache the outcome.
         self._send_temperature: bool = True
@@ -101,7 +118,7 @@ class AnthropicClient:
 
         sent_temp = self._send_temperature
         try:
-            resp = await self._client.messages.create(**_kwargs(sent_temp))
+            resp = await self._call_with_timeout_and_retry(_kwargs(sent_temp))
         except APIError as e:
             # Retry without ``temperature`` if:
             #   (a) this call sent it and the server said it's deprecated, OR
@@ -112,7 +129,7 @@ class AnthropicClient:
             if sent_temp and _is_deprecated_temperature_error(e):
                 self._send_temperature = False
                 try:
-                    resp = await self._client.messages.create(**_kwargs(False))
+                    resp = await self._call_with_timeout_and_retry(_kwargs(False))
                 except APIError as e2:
                     raise self._wrap_api_error(e2) from e2
             else:
@@ -148,6 +165,49 @@ class AnthropicClient:
             stop_reason=getattr(resp, "stop_reason", None),
             raw=resp.model_dump() if hasattr(resp, "model_dump") else {},
         )
+
+    # ------------------------------------------------------------------ timeout + retry
+
+    async def _call_with_timeout_and_retry(self, kwargs: dict[str, Any]) -> Any:
+        """Call ``messages.create`` with wall-clock timeout + bounded retry.
+
+        Wraps each SDK call in ``asyncio.wait_for(..., timeout=self._timeout_s)``
+        so that a stuck TCP connection, a broken SDK timer, or any other form
+        of in-SDK hang cannot block the caller for longer than
+        ``self._timeout_s`` per attempt.
+
+        On :class:`asyncio.TimeoutError` we retry up to ``self._max_retries``
+        additional times with exponential backoff (1s, 2s, 4s, capped at 8s).
+        All timeout attempts exhausted -> raise :class:`ModelError` with a
+        diagnostic message. :class:`APIError` is passed through unchanged so
+        the caller's existing auth/deprecated-temperature handling still works.
+        """
+        last_timeout: asyncio.TimeoutError | None = None
+        total_attempts = self._max_retries + 1
+        for attempt in range(total_attempts):
+            try:
+                return await asyncio.wait_for(
+                    self._client.messages.create(**kwargs),
+                    timeout=self._timeout_s,
+                )
+            except asyncio.TimeoutError as e:
+                last_timeout = e
+                if attempt + 1 < total_attempts:
+                    backoff = min(2.0 ** attempt, 8.0)
+                    log.warning(
+                        "Anthropic call to %s timed out after %.0fs "
+                        "(attempt %d/%d); retrying in %.1fs",
+                        self.model_id, self._timeout_s,
+                        attempt + 1, total_attempts, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+        # All attempts timed out.
+        raise ModelError(
+            f"Anthropic call to {self.model_id!r} timed out after "
+            f"{self._timeout_s:.0f}s across {total_attempts} attempt(s). "
+            "The SDK call did not return within the wall-clock budget. "
+            "Increase timeout_s or investigate network/Anthropic availability."
+        ) from last_timeout
 
     # ------------------------------------------------------------------ errors
 
