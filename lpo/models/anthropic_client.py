@@ -128,13 +128,23 @@ class AnthropicClient:
         usage = getattr(resp, "usage", None)
         prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        # Cost is billed against the requested model id (that's what pricing
+        # tables are keyed on). Observability / provenance uses the served
+        # model id (see below). These are usually the same string; they can
+        # diverge when the requested id is an alias that Anthropic resolves
+        # to a concrete version (e.g. "claude-opus-4-5" -> "claude-sonnet-4-
+        # 20250514" during a redirect window). Conflating the two meant the
+        # Stage-8 postmortem surfaced contradictory analyst_model_id values
+        # between the top-level envelope and the diagnosis.json payload.
         self.cost.record(self.model_id, prompt_tokens, completion_tokens)
+
+        served_model_id = getattr(resp, "model", None) or self.model_id
 
         return AnthropicResult(
             text=text,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            model_id=self.model_id,
+            model_id=served_model_id,
             stop_reason=getattr(resp, "stop_reason", None),
             raw=resp.model_dump() if hasattr(resp, "model_dump") else {},
         )

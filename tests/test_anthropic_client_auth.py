@@ -95,6 +95,56 @@ async def test_non_auth_errors_use_legacy_message_format(monkeypatch):
     assert "authentication failed" not in str(excinfo.value).lower()
 
 
+@pytest.mark.asyncio
+async def test_result_model_id_reflects_served_model_when_alias_redirects(monkeypatch):
+    """When the Anthropic server resolves an alias to a different concrete
+    model id, :class:`AnthropicResult` must carry the *served* id so that
+    downstream provenance (e.g. Stage-8 ``diagnosis.json`` stamping) is
+    self-consistent with the Analyst's self-reported identity. Regression
+    for the Stage-8 bug where the top-level envelope reported
+    ``claude-opus-4-5`` (the alias we asked for) while ``diagnosis.json``
+    reported ``claude-sonnet-4-20250514`` (what actually answered).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    c = AnthropicClient(model_id="claude-opus-4-5")
+    c._client = MagicMock()
+    c._client.messages = MagicMock()
+
+    fake_resp = MagicMock()
+    fake_resp.content = [MagicMock(text="hello", __class__=MagicMock)]
+    fake_resp.content[0].text = "hello"
+    fake_resp.usage = MagicMock(input_tokens=5, output_tokens=3)
+    fake_resp.stop_reason = "end_turn"
+    fake_resp.model = "claude-sonnet-4-20250514"  # server-resolved
+    fake_resp.model_dump = lambda: {"model": "claude-sonnet-4-20250514"}
+
+    c._client.messages.create = AsyncMock(return_value=fake_resp)
+    result = await c.complete(system="s", messages=[AnthropicMessage("user", "hi")])
+
+    assert result.model_id == "claude-sonnet-4-20250514"
+    assert c.model_id == "claude-opus-4-5"  # client-side attribute untouched
+
+
+@pytest.mark.asyncio
+async def test_result_model_id_falls_back_to_requested_when_server_omits(monkeypatch):
+    """If the SDK response somehow lacks ``model`` (older SDK / mock), we
+    fall back to the requested id rather than returning None."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    c = AnthropicClient(model_id="claude-haiku-4-5")
+    c._client = MagicMock()
+    c._client.messages = MagicMock()
+
+    fake_resp = MagicMock(spec=["content", "usage", "stop_reason"])
+    fake_resp.content = [MagicMock()]
+    fake_resp.content[0].text = "ok"
+    fake_resp.usage = MagicMock(input_tokens=1, output_tokens=1)
+    fake_resp.stop_reason = "end_turn"
+
+    c._client.messages.create = AsyncMock(return_value=fake_resp)
+    result = await c.complete(system="s", messages=[AnthropicMessage("user", "hi")])
+    assert result.model_id == "claude-haiku-4-5"
+
+
 def test_fingerprint_helper_never_leaks_middle_of_secret():
     # Defence in depth: the module-level helper used by auth enrichment
     # (and mirrored in the MCP server) must never emit middle chars.
