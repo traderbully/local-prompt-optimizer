@@ -68,6 +68,11 @@ class LMStudioClient(ModelClient):
                 raise ModelError(f"Unsupported ContentBlock.kind: {block.kind!r}")
         return parts
 
+    # Cap on automatic max_tokens escalation when a reasoning model eats the
+    # entire budget with its Chain-of-Thought. Prevents runaway retries from
+    # a mis-configured model that simply never produces `content`.
+    REASONING_RETRY_CAP = 16384
+
     async def generate(
         self,
         system_prompt: str,
@@ -77,12 +82,86 @@ class LMStudioClient(ModelClient):
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> GenerationResult:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": self._to_message_content(user_input)},
+        ]
+        start = time.perf_counter()
+
+        # First attempt with the caller-provided budget.
+        data, text, reasoning, finish, usage = await self._post_chat(
+            messages=messages, seed=seed, temperature=temperature, max_tokens=max_tokens
+        )
+
+        # Reasoning-budget auto-retry: if the model produced *no* final
+        # content but did produce hidden CoT and was truncated on length,
+        # double max_tokens (up to the cap) and try once more. This is the
+        # canonical fix for the reasoning-model-ate-its-own-budget failure
+        # mode documented in README/Gotchas. One retry only to bound cost.
+        if (
+            not text.strip()
+            and reasoning.strip()
+            and finish == "length"
+            and max_tokens < self.REASONING_RETRY_CAP
+        ):
+            bumped = min(max_tokens * 2, self.REASONING_RETRY_CAP)
+            log.info(
+                "LM Studio reasoning-budget auto-retry: model=%s produced %d chars of "
+                "reasoning_content but empty content at max_tokens=%d. Retrying with "
+                "max_tokens=%d (cap=%d).",
+                self.model_id, len(reasoning), max_tokens, bumped, self.REASONING_RETRY_CAP,
+            )
+            data, text, reasoning, finish, usage = await self._post_chat(
+                messages=messages, seed=seed, temperature=temperature, max_tokens=bumped,
+            )
+            max_tokens = bumped  # surfaced through the final result's raw payload
+
+        # Escalated logging: empty content after all retries is a real error,
+        # not a cosmetic warning. The caller's iteration will score 0 and
+        # operators need to see this prominently in the log.
+        if not text.strip():
+            reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens")
+            hint = f"finish_reason={finish!r}, reasoning_tokens={reasoning_tokens}"
+            if reasoning.strip():
+                log.error(
+                    "LM Studio returned empty content after reasoning-budget retry: "
+                    "model=%s, reasoning_content=%d chars, %s. Cap=%d reached; increase "
+                    "target_models.max_tokens in config.yaml or load a model with a "
+                    "larger context window.",
+                    self.model_id, len(reasoning), hint, self.REASONING_RETRY_CAP,
+                )
+            else:
+                log.error(
+                    "LM Studio returned empty content (no reasoning either): model=%s, "
+                    "%s. Likely a tokenizer/server misconfiguration. Raw: %s",
+                    self.model_id, hint, str(data)[:500],
+                )
+
+        latency = time.perf_counter() - start
+        return GenerationResult(
+            text=text,
+            prompt_tokens=int(usage.get("prompt_tokens", 0)),
+            completion_tokens=int(usage.get("completion_tokens", 0)),
+            latency_s=latency,
+            seed=seed,
+            model_id=self.model_id,
+            provider=self.provider,
+            raw=data,
+        )
+
+    async def _post_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        seed: int | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[dict[str, Any], str, str, Any, dict[str, Any]]:
+        """Single chat completion with transient-failure retries. Returns
+        ``(raw_data, text, reasoning_text, finish_reason, usage)``."""
         payload: dict[str, Any] = {
             "model": self.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self._to_message_content(user_input)},
-            ],
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -91,8 +170,6 @@ class LMStudioClient(ModelClient):
 
         url = f"{self.base_url}/chat/completions"
         last_err: Exception | None = None
-        start = time.perf_counter()
-
         for attempt in range(self.max_retries):
             try:
                 resp = await self._client.post(url, json=payload)
@@ -109,9 +186,10 @@ class LMStudioClient(ModelClient):
             data = resp.json()
             break
         else:
-            raise ModelError(f"LM Studio request failed after {self.max_retries} attempts: {last_err}")
+            raise ModelError(
+                f"LM Studio request failed after {self.max_retries} attempts: {last_err}"
+            )
 
-        latency = time.perf_counter() - start
         try:
             choice = data["choices"][0]
             msg = choice["message"]
@@ -121,34 +199,7 @@ class LMStudioClient(ModelClient):
         usage = data.get("usage") or {}
         finish = choice.get("finish_reason")
         reasoning = msg.get("reasoning_content") or ""
-        if not text.strip():
-            # The model returned empty content. Almost always one of two causes:
-            #   (a) Reasoning model that spent all tokens thinking — `reasoning_content`
-            #       is populated and finish_reason="length". Raise max_tokens.
-            #   (b) Server/tokenizer misconfiguration.
-            hint = (
-                f"finish_reason={finish!r}, reasoning_tokens={usage.get('completion_tokens_details', {}).get('reasoning_tokens')}"
-            )
-            if reasoning.strip():
-                log.warning(
-                    "LM Studio returned empty content but reasoning_content has %d chars "
-                    "(%s). Likely a reasoning model that ran out of tokens before the final answer. "
-                    "Increase target_models.max_tokens.",
-                    len(reasoning),
-                    hint,
-                )
-            else:
-                log.warning("LM Studio returned empty content (%s). Raw: %s", hint, str(data)[:500])
-        return GenerationResult(
-            text=text,
-            prompt_tokens=int(usage.get("prompt_tokens", 0)),
-            completion_tokens=int(usage.get("completion_tokens", 0)),
-            latency_s=latency,
-            seed=seed,
-            model_id=self.model_id,
-            provider=self.provider,
-            raw=data,
-        )
+        return data, text, reasoning, finish, usage
 
 
 def _backoff(attempt: int) -> float:
