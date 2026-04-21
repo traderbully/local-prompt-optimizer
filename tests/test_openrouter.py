@@ -327,10 +327,81 @@ async def test_reasoning_empty_content_warning(monkeypatch, caplog):
     )
     resp.text = "ok"
     client._client.post = AsyncMock(return_value=resp)
-    with caplog.at_level("WARNING", logger="lpo.models.openrouter"):
+    with caplog.at_level("INFO", logger="lpo.models.openrouter"):
         gen = await client.generate("sys", "x")
     assert gen.text == ""
+    # Auto-retry path: one INFO log announcing the retry, one ERROR after
+    # the retry still fails. The exact message wording is less important
+    # than the fact that both records mention reasoning_content.
     assert any("reasoning_content" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_reasoning_auto_retry_recovers(monkeypatch):
+    # Parity with LMStudioClient: empty content + populated reasoning +
+    # finish_reason='length' must trigger a retry with doubled max_tokens,
+    # and content returned on the retry should surface as the final result.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    pricing = await _fake_pricing({"z/thinker": (0.1, 0.2)})
+    client = OpenRouterClient(model_id="z/thinker", pricing=pricing)
+
+    first = MagicMock()
+    first.status_code = 200
+    first.text = "ok"
+    first.json = MagicMock(return_value={
+        "choices": [{
+            "message": {"content": "", "reasoning_content": "think " * 100},
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 500},
+    })
+    second = MagicMock()
+    second.status_code = 200
+    second.text = "ok"
+    second.json = MagicMock(return_value={
+        "choices": [{
+            "message": {"content": '{"ok": true}'},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 200},
+    })
+    client._client.post = AsyncMock(side_effect=[first, second])
+
+    gen = await client.generate("sys", "x", max_tokens=2048)
+
+    assert gen.text == '{"ok": true}'
+    assert client._client.post.call_count == 2
+    second_payload = client._client.post.call_args_list[1].kwargs["json"]
+    assert second_payload["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_openrouter_empty_content_without_reasoning_no_retry(monkeypatch, caplog):
+    # If reasoning_content is empty, a retry with more tokens would not
+    # help — we don't burn the budget on a doomed attempt.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    pricing = await _fake_pricing({"x/broken": (0.1, 0.2)})
+    client = OpenRouterClient(model_id="x/broken", pricing=pricing)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = "ok"
+    resp.json = MagicMock(return_value={
+        "choices": [{
+            "message": {"content": "", "reasoning_content": ""},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 0},
+    })
+    client._client.post = AsyncMock(return_value=resp)
+    with caplog.at_level("ERROR", logger="lpo.models.openrouter"):
+        gen = await client.generate("sys", "x", max_tokens=1024)
+    assert gen.text == ""
+    assert client._client.post.call_count == 1
+    # Must still escalate to ERROR (part of Stage-7 logging hygiene).
+    assert any(
+        r.levelname == "ERROR" and "no reasoning" in r.message
+        for r in caplog.records
+    ), [(r.levelname, r.message) for r in caplog.records]
 
 
 # ---------------------------------------------------------------------------

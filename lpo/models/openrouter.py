@@ -132,6 +132,10 @@ class OpenRouterClient(ModelClient):
                 )
             self._rate_registered = True
 
+    # Matches LMStudioClient.REASONING_RETRY_CAP so the same env config
+    # behaves identically across local and hosted reasoning models.
+    REASONING_RETRY_CAP = 16384
+
     async def generate(
         self,
         system_prompt: str,
@@ -139,16 +143,87 @@ class OpenRouterClient(ModelClient):
         *,
         seed: int | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ) -> GenerationResult:
         await self._register_rate_once()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": self._to_message_content(user_input)},
+        ]
+        start = time.perf_counter()
 
+        data, text, reasoning, finish, usage = await self._post_chat(
+            messages=messages, seed=seed, temperature=temperature, max_tokens=max_tokens
+        )
+
+        # Reasoning-budget auto-retry (mirrors LMStudioClient). Only retry
+        # once and only when the evidence is unambiguous: model produced CoT
+        # but no final content, and the server said it was truncated. Callers
+        # already above the cap get a single attempt — failure there reflects
+        # a model/config problem, not a budget problem.
+        if (
+            not text.strip()
+            and reasoning.strip()
+            and finish == "length"
+            and max_tokens < self.REASONING_RETRY_CAP
+        ):
+            bumped = min(max_tokens * 2, self.REASONING_RETRY_CAP)
+            log.info(
+                "OpenRouter reasoning-budget auto-retry: model=%s produced %d chars "
+                "of reasoning_content but empty content at max_tokens=%d. Retrying "
+                "with max_tokens=%d (cap=%d).",
+                self.model_id, len(reasoning), max_tokens, bumped, self.REASONING_RETRY_CAP,
+            )
+            data, text, reasoning, finish, usage = await self._post_chat(
+                messages=messages, seed=seed, temperature=temperature, max_tokens=bumped,
+            )
+
+        if not text.strip():
+            # ERROR, not WARNING: scoring downstream will credit this with 0
+            # and operators need to see the cause in the log without digging.
+            if reasoning.strip():
+                log.error(
+                    "OpenRouter returned empty content after reasoning-budget retry: "
+                    "model=%s, reasoning_content=%d chars, finish_reason=%r. Cap=%d "
+                    "reached; raise target_models.max_tokens or switch model.",
+                    self.model_id, len(reasoning), finish, self.REASONING_RETRY_CAP,
+                )
+            else:
+                log.error(
+                    "OpenRouter returned empty content (no reasoning either): model=%s, "
+                    "finish_reason=%r. Likely a provider-side issue. Raw: %s",
+                    self.model_id, finish, str(data)[:500],
+                )
+
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        if self.cost is not None:
+            self.cost.record(self.model_id, prompt_tokens, completion_tokens)
+
+        return GenerationResult(
+            text=text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_s=time.perf_counter() - start,
+            seed=seed,
+            model_id=self.model_id,
+            provider=self.provider,
+            raw=data,
+        )
+
+    async def _post_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        seed: int | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[dict[str, Any], str, str, Any, dict[str, Any]]:
+        """Single chat-completion request with transient-failure + 429 retries.
+        Returns ``(raw_data, text, reasoning_text, finish_reason, usage)``."""
         payload: dict[str, Any] = {
             "model": self.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self._to_message_content(user_input)},
-            ],
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -157,8 +232,6 @@ class OpenRouterClient(ModelClient):
 
         url = f"{self.base_url}/chat/completions"
         last_err: Exception | None = None
-        start = time.perf_counter()
-
         for attempt in range(self.max_retries):
             try:
                 resp = await self._client.post(url, json=payload)
@@ -184,7 +257,6 @@ class OpenRouterClient(ModelClient):
                 f"OpenRouter request failed after {self.max_retries} attempts: {last_err}"
             )
 
-        latency = time.perf_counter() - start
         try:
             choice = data["choices"][0]
             msg = choice["message"]
@@ -194,29 +266,7 @@ class OpenRouterClient(ModelClient):
         usage = data.get("usage") or {}
         finish = choice.get("finish_reason")
         reasoning = msg.get("reasoning_content") or ""
-        if not text.strip() and reasoning.strip():
-            log.warning(
-                "OpenRouter %s returned empty content but reasoning_content has %d chars "
-                "(finish_reason=%r). Likely a reasoning model that ran out of tokens. "
-                "Raise target_models.max_tokens.",
-                self.model_id, len(reasoning), finish,
-            )
-
-        prompt_tokens = int(usage.get("prompt_tokens", 0))
-        completion_tokens = int(usage.get("completion_tokens", 0))
-        if self.cost is not None:
-            self.cost.record(self.model_id, prompt_tokens, completion_tokens)
-
-        return GenerationResult(
-            text=text,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_s=latency,
-            seed=seed,
-            model_id=self.model_id,
-            provider=self.provider,
-            raw=data,
-        )
+        return data, text, reasoning, finish, usage
 
 
 def _backoff(attempt: int) -> float:

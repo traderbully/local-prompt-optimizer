@@ -101,17 +101,72 @@ Scoring is taken seriously. Three metric families are available, stackable:
 
 Metrics are declared in `metric.yaml`, not hardcoded. You can start with pure deterministic (fast, free, offline) and add a rubric layer only when you need it.
 
+#### Which metric type should I use? — decision tree
+
+Picking the right metric is the single biggest quality lever in LPO. A badly-fit metric either plateaus uniformly (deterministic on a task it can't measure) or burns money without separating good prompts from bad ones (rubric on a task deterministic could've solved free).
+
+Start here:
+
+1. **Does the task have a single correct output?** (structured extraction, format conversion, deterministic code generation, unit-convertible numeric answers)
+   - **Yes → Deterministic.** Use `field_exact_match`, `numeric_tolerance`, `has_keys`, `is_valid_json`, `regex_match`, or combine with weights. Stop. Do not add a rubric — you'll pay for an LLM judge to tell you what `==` already knows.
+   - **No → continue.**
+
+2. **Is quality measurable by a short list of independent rules?** ("is this a polite email?", "does this code have type hints AND a docstring AND ≤80-char lines?", "is the tone formal?")
+   - **Yes → Rubric.** 3–6 criteria with weights. The judge sees the output + gold + your criteria and scores each 0–100. Predictable cost (one judge call per example per iteration), good separation.
+   - **No → continue.**
+
+3. **Is quality task-specific and context-dependent?** ("would this be a good reply in *this* conversation?", "does this summary preserve the argument of *this* paper?", "is this creative writing *appropriate* for the requested register?")
+   - **Yes → Conversational.** The judge gets multi-turn access to the task description, gold standard, and the Overseer's latest rationale. Most expensive option; justified only when rubric criteria can't capture what "good" means. Expect 2–4× the cost of rubric.
+
+#### Watch out for these anti-patterns
+
+- **Flat, uniform per-example scores on iter 1** — a strong smell that your metric is measuring *prompt shape* (output is valid JSON, has the right keys) rather than *prompt content*. Fine as a baseline but you need at least one content-sensitive rule or the ratchet will plateau early. Example: `json_valid` (weight 30) + `has_keys` (weight 40) + `field_exact_match` (weight 30) — every seed output that is structurally correct scores 43.33 uniformly because 30+(40/3)+0 = 43.33. Add `field_exact_match` or a rubric criterion on semantic content and the metric will start to discriminate.
+- **Rubric criteria that overlap** — "is the response professional?" and "is the tone formal?" aren't independent; the judge effectively double-weights the same signal. Keep criteria orthogonal.
+- **Using conversational for everything** — it's the most flexible, which makes it the easiest to misuse. If a rubric works, use a rubric: cheaper, more reproducible, and easier to audit after the run.
+- **No gold standard for a rubric/conversational metric** — the judge works without it but quality drops sharply. Generate one with `lpo_generate_gold_standard` before the first real run.
+
+#### Stacking metric types
+
+`metric.yaml` lets you combine rules across families. A common pattern for structured tasks with subjective polish:
+
+```yaml
+type: composite
+rules:
+  - type: deterministic
+    weight: 60
+    rules:
+      - name: json_valid
+        weight: 30
+        check: is_valid_json
+      - name: fields_present
+        weight: 70
+        check: has_keys
+        params: [command, verify_command, user_message]
+  - type: rubric
+    weight: 40
+    criteria:
+      - name: commands_are_correct
+        weight: 60
+        description: The PowerShell command, if executed, would satisfy the user's request.
+      - name: user_message_is_honest
+        weight: 40
+        description: The user_message describes what WILL happen (future tense), not what HAS happened.
+```
+
+60% deterministic (free, catches structural failures fast) + 40% rubric (paid, catches semantic failures). Total cost scales with the rubric fraction.
+
 ### Headless-first, MCP-native
 
-LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live run monitoring, manual-mode feedback, and winner export. But the UI is strictly optional. The same engine is exposed as an **MCP stdio server** with seven tools:
+LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live run monitoring, manual-mode feedback, and winner export. But the UI is strictly optional. The same engine is exposed as an **MCP stdio server** with eight tools:
 
 - `lpo_create_task` — author a task bundle from a description and inputs
-- `lpo_generate_gold_standard` — fill in reference outputs
+- `lpo_generate_gold_standard` — fill in reference outputs (routable through OpenRouter via `GOLD_STANDARD_PROVIDER=openrouter`; see `.env.example`)
 - `lpo_run_optimization` — run the ratchet to completion (optional `target_slugs` filter restricts a multi-target task to a subset, e.g. LM-Studio-only, without editing `config.yaml`)
 - `lpo_get_status` — iteration count, best score, cost
 - `lpo_get_winner` — return the winning prompt and its report
 - `lpo_get_comparison` — cross-model report for Strategies B and C
 - `lpo_list_tasks` — discover bundles under a tasks root
+- `lpo_reload_env` — re-read `.env` into the running MCP process (fingerprinted diff, no restart required after key rotation)
 
 Register LPO once in Windsurf or Claude Desktop and you can drive the entire optimization pipeline from agent chat: *"Create an LPO task that writes email subject lines, generate the gold standard, run it, and tell me the winning prompt."* The agent does every step, end-to-end, without ever leaving the conversation.
 
@@ -119,7 +174,7 @@ Register LPO once in Windsurf or Claude Desktop and you can drive the entire opt
 
 ## Status
 
-**Stage 6 of the SDP — MCP server complete.** The engine, scoring stack, Overseer, multi-target strategies (A/B/C), web UI, and MCP surface are all in place and covered by 111 tests running in under five seconds. Remaining polish (deterministic seed control, scenario weighting, dashboard refinements) tracks [`LPO_SDP.md`](./LPO_SDP.md) §10.
+**Stage 7 (current) — operational hardening.** On top of the Stage-1-through-6 engine + scoring + Overseer + multi-target + web UI + MCP surface, Stage 7 addresses the rough edges surfaced by real bake-offs: scoped `fresh` wipes that don't destroy unrelated slugs' history, single-target-subset runs that collapse to the single-target path (no vacuous "winner of one" reports), enriched 401 auth diagnostics with key fingerprints and `.env`-vs-shell drift detection, reasoning-budget auto-retry across both LM Studio and OpenRouter, empty-content logging escalated to ERROR, a `lpo_reload_env` MCP tool for key rotation without IDE restart, and a pluggable Gold Standard Source that can route through OpenRouter for operators without direct Anthropic billing. 138 tests, <7 s. Remaining polish (deterministic seed control, scenario weighting, dashboard refinements) tracks [`LPO_SDP.md`](./LPO_SDP.md) §10.
 
 ---
 
