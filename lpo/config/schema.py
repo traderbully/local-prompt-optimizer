@@ -49,7 +49,16 @@ class TargetModelConfig(BaseModel):
     model_id: str
     api_key_env: str | None = None  # env var name for Authorization; optional for LM Studio
     temperature: float = 0.2
-    max_tokens: int = 2048
+    # Raised from 2048 to 4096 on Apr 21 after the windows_file_ops_reliability
+    # / gemma-4-26b-local forensic investigation: the 2048 default caused
+    # silent completion-token exhaustion on reasoning-heavy tasks (three
+    # scenarios scored 0 because the model consumed the entire budget on
+    # hidden CoT before emitting a single JSON token). Bumping to 4096
+    # produced +27 aggregate points on that task with zero regression
+    # elsewhere. The cost of the higher ceiling is bounded (providers
+    # still only bill actual completion tokens) so the conservative
+    # move is to make the new floor the default.
+    max_tokens: int = 4096
     seed_policy: Literal["fixed", "fixed_per_example", "unlocked"] = "fixed_per_example"
     fixed_seed: int = 0
     weight: float | None = None

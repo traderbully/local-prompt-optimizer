@@ -144,12 +144,24 @@ Allowed `finding.type` values:
 - `overseer_local_optimum` — the Overseer kept making the same class of mutation while the real problem was elsewhere.
 - `model_fit_issue` — the failure pattern is characteristic of a specific model's tokenizer/alignment limitations.
 
-Allowed `intervention.type` values:
+Allowed `intervention.type` values and their REQUIRED `patch` shape:
+
 - `prompt_patch` — append/prepend/replace specific rules in the current best prompt.
+  Required patch shape: `{"mode": "append"|"prepend"|"replace", "content": "<text>"}`
 - `seed_reset` — replace the seed prompt entirely (bigger intervention; use only when the best prompt is so warped that in-place patching won't recover).
+  Required patch shape: `{"new_seed": "<complete new seed prompt>"}`
 - `metric_patch` — add/modify rules in metric.yaml. Always report-only.
+  Required patch shape: `{"rationale": "<why the metric is flawed>"}`
 - `eval_addition` — propose new eval examples stressing a missing category. Advisory; never applied.
+  Required patch shape: `{"new_examples": [{"input": "<text>", "expected": "<text>", "scenario": "<tag>"}, ...]}`  (non-empty list)
 - `model_swap_suggestion` — flag that a different model may be needed. Advisory only.
+  Required patch shape: `{"rationale": "<why the current model is inadequate>", "suggested_models": ["<model_id>", ...]}`  (non-empty list)
+
+The `patch` field MUST be a JSON object with the keys listed above for
+the chosen type. It is NEVER null, NEVER a string, and NEVER an empty
+object. Interventions that omit required patch keys are rejected at
+validation time, so emit every key explicitly even when the value is
+short.
 
 # Output format
 
@@ -556,8 +568,22 @@ def _retry_feedback(error: str | None) -> str:
         f"{error}\n\n"
         "Please re-emit the JSON object with the errors corrected. "
         "Respond with exactly one JSON object — no preamble, no "
-        "postamble, no markdown fences. Ensure every finding has the "
-        "full evidence block (iterations, example_ids, score_breakdown) "
-        "and every intervention has a non-empty `fixes` list of finding "
-        "IDs."
+        "postamble, no markdown fences. Common fix checklist:\n"
+        "\n"
+        "- EVERY finding needs `root_cause_hypothesis` (non-empty string) — "
+        "not just F1 but F2, F3, etc.\n"
+        "- EVERY finding needs the full `evidence` block: `iterations`, "
+        "`example_ids`, and `score_breakdown` (all non-empty).\n"
+        "- EVERY intervention needs a non-empty `fixes` list of finding "
+        "IDs like `[\"F1\"]`.\n"
+        "- EVERY intervention needs a `patch` object matching its type's "
+        "required shape:\n"
+        "  * `prompt_patch` -> {mode, content}\n"
+        "  * `seed_reset` -> {new_seed}\n"
+        "  * `metric_patch` -> {rationale}\n"
+        "  * `eval_addition` -> {new_examples: [...]}\n"
+        "  * `model_swap_suggestion` -> {rationale, suggested_models: [...]}\n"
+        "  The `patch` field is NEVER null, empty, or a string.\n"
+        "- `metric_mismatch` and `model_fit_issue` findings also need "
+        "`differential_evidence`.\n"
     )
