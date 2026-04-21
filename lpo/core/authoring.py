@@ -332,9 +332,14 @@ async def generate_gold_standard(
 
     own_client = False
     if client is None:
-        from lpo.models.anthropic_client import AnthropicClient  # lazy — avoids anthropic import for stub tests
+        # The Gold Standard source is pluggable via env vars (see
+        # lpo.models.gold_source). Defaults preserve the historical behavior
+        # of going straight to Anthropic — but operators with OpenRouter
+        # credits and no direct Anthropic billing can route through
+        # OpenRouter by setting GOLD_STANDARD_PROVIDER=openrouter.
+        from lpo.models.gold_source import build_gold_standard_source
 
-        client = AnthropicClient(
+        client = build_gold_standard_source(
             model_id=model_id or task.config.overseer_model.model_id,
             cost_tracker=cost_tracker,
         )

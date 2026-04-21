@@ -125,9 +125,11 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "lpo_generate_gold_standard",
         "description": (
-            "Call the Anthropic Gold Standard Source to produce ideal outputs "
-            "for every entry in the task's eval_set.jsonl and write "
-            "gold_standard.jsonl. Requires ANTHROPIC_API_KEY."
+            "Call the Gold Standard Source to produce ideal outputs for every "
+            "entry in the task's eval_set.jsonl and write gold_standard.jsonl. "
+            "Defaults to direct Anthropic (requires ANTHROPIC_API_KEY). Can be "
+            "routed through OpenRouter by setting GOLD_STANDARD_PROVIDER="
+            "openrouter in .env (see .env.example for all routing vars)."
         ),
         "inputSchema": {
             "type": "object",
