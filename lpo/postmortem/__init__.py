@@ -8,6 +8,20 @@ auto-commit only prompt/seed changes — never metric or eval changes.
 
 from __future__ import annotations
 
+from lpo.postmortem.analyst import (
+    AnalystClient,
+    AnalystError,
+    AnalystResult,
+    build_analyst_context,
+    run_analyst,
+)
+from lpo.postmortem.artifacts import (
+    IterationArtifact,
+    IterationDecision,
+    IterationScores,
+    RunHistoryBundle,
+    load_run_history,
+)
 from lpo.postmortem.schemas import (
     Decision,
     DecisionOutcome,
@@ -23,6 +37,9 @@ from lpo.postmortem.schemas import (
 )
 
 __all__ = [
+    "AnalystClient",
+    "AnalystError",
+    "AnalystResult",
     "Decision",
     "DecisionOutcome",
     "Diagnosis",
@@ -31,7 +48,14 @@ __all__ = [
     "FindingType",
     "Intervention",
     "InterventionType",
+    "IterationArtifact",
+    "IterationDecision",
+    "IterationScores",
     "PostmortemConfig",
     "PostmortemPlan",
     "Proposal",
+    "RunHistoryBundle",
+    "build_analyst_context",
+    "load_run_history",
+    "run_analyst",
 ]
