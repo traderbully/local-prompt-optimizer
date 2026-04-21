@@ -1,5 +1,5 @@
 type: rubric
-judge_model: claude-sonnet-4-5
+judge_model: claude-sonnet-4-6
 criteria:
   - name: command_correctness
     weight: 40
