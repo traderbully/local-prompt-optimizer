@@ -1,7 +1,15 @@
 # Stage 8 — Postmortem Analysis & Remediation (Design)
 
-**Status:** Proposal, awaiting review.
-**Scope:** Design only. No implementation until approved.
+**Status:** Approved with adjustments (Apr 21 2026). Implementation in progress.
+**Scope:** Design doc for the Stage 8 postmortem phase.
+
+**Review adjustments applied:**
+- Postmortem is **opt-in only**. No automatic invocation at the end of `run_single` / `run_multi`. MCP tool call or explicit config flag required.
+- Cost is governed by a **separate budget**: `postmortem.cost_cap_usd`, default `$2.50`. Does not share the task's `cost_cap_usd`.
+- **Cross-slug findings** ("this intervention would help slug X but hurt slug Y") are out of scope for v1. Per-slug independent only. Revisit after real-world usage surfaces the need.
+- **Metric-patch interventions are never auto-committed.** The Analyst may propose them and the meta-check sanity pass is still run for reporting, but the decision gate treats every `metric_patch` as report-only awaiting human approval. Only `prompt_patch` and `seed_reset` can be auto-committed on threshold.
+- **Evidence-based findings only.** Every finding in `diagnosis.json` must cite specific iteration numbers, scenario IDs, and score breakdowns. Every intervention in `proposal.md` must reference the finding IDs it addresses. Free-floating narrative is rejected at schema validation.
+
 **Relation to existing system:** New *phase* bolted onto the end of the main optimization loop; uses the existing `RatchetEngine` for validation but adds a new model role (the *Postmortem Analyst*) and new on-disk artifacts under `runs/<slug>/postmortem/`.
 
 ---
@@ -18,38 +26,41 @@ A 30-second human read of the full run artifacts surfaces all three. The Oversee
 
 ## 2. Proposal at a glance
 
-After the main ratchet terminates, run a dedicated **postmortem phase** with its own model role:
+A dedicated **postmortem phase**, invoked only on explicit request, with its own model role:
 
 ```
-main ratchet exits (any stop reason except cost_cap)
+(postmortem explicitly invoked — never auto-runs)
         │
         ▼
 [Postmortem Analyst]  ← reads full run artifacts from disk, single frontier call
-        │   emits diagnosis.json (structured findings)
+        │   emits diagnosis.json — every finding MUST cite iter numbers + scenario IDs + scores
         ▼
 [Remediation Planner]  ← same model, same conversation — emits proposal.md
-        │   (patches to prompt / metric / seed; eval additions proposed but not applied)
+        │   every intervention MUST reference the finding IDs it addresses
+        │   (prompt/seed patches auto-applicable; metric patches ALWAYS report-only; eval additions proposed not applied)
         ▼
 [Focused Validation]   ← reuses RatchetEngine for 3 iters with the patched prompt
-        │   measures raw delta + remediation delta + regression risk
+        │   measures global delta + remediation delta + regression risk
+        │   (skipped entirely when the only applicable interventions are metric_patch or eval_addition)
         ▼
-[Decision Gate]        ← accept / reject / abstain against configurable thresholds
-        │
+[Decision Gate]        ← accept (prompt/seed only) / reject / abstain (metric or eval interventions)
+        │   separate postmortem.cost_cap_usd budget (default $2.50)
         ▼
 runs/<slug>/postmortem/{diagnosis.json, proposal.md, retry/, decision.json, report.md}
 ```
 
-Opt-in. Defaults off. Can be triggered three ways: `config.yaml` flag (runs automatically after the main loop), MCP tool `lpo_run_postmortem`, or CLI `lpo postmortem <task_dir>`.
+**Opt-in only.** Two entry points: the MCP tool `lpo_run_postmortem` and the CLI `lpo postmortem <task_dir>`. There is no `postmortem.auto_run_after_ratchet` flag — the Apr 21 review explicitly rejected auto-invocation. `config.yaml` still carries a `postmortem:` block, but its fields govern thresholds and budget, not whether the phase runs.
 
 ---
 
 ## 3. Where it plugs in
 
-Bolts on after the main ratchet, not into it. Three entry points:
+Bolts on after the main ratchet, not into it. Two entry points (per Apr 21 review — no automatic invocation):
 
-- **Automatic** — `config.yaml: postmortem.enabled: true` causes `run_single` / `run_multi` to invoke the phase once the main loop returns (any `stop_reason` except `cost_cap`, since budget exhaustion signals a different problem).
-- **MCP tool** — `lpo_run_postmortem(task_id, slug?, mode="autonomous"|"propose_only")`. Lets an agent trigger it post-hoc on any completed run without re-running the main loop.
-- **CLI** — `lpo postmortem <task_dir> [--slug X]` for manual invocation.
+- **MCP tool** — `lpo_run_postmortem(task_id, slug?, mode="autonomous"|"propose_only")`. The primary entry point. Callable post-hoc on any completed run; can also be invoked from an agent conversation right after `lpo_run_optimization` returns.
+- **CLI** — `lpo postmortem <task_dir> [--slug X]` for manual invocation from an operator's shell.
+
+`run_single` / `run_multi` do **not** invoke the postmortem phase internally. A deliberately-left option `config.yaml: postmortem.enabled` was considered and rejected during review: opt-in by explicit call only, to keep the cost model predictable and avoid surprise billing on completed ratchet runs.
 
 The engine itself is untouched. `RatchetEngine` only needs one new capability — the ability to start from a patched prompt and a restricted iteration budget — which it already supports via existing `prompt_override` and `max_iterations` parameters.
 
@@ -57,7 +68,11 @@ The engine itself is untouched. `RatchetEngine` only needs one new capability �
 
 A single frontier-model call (same binding as the Overseer — Claude by default) with a clean context loaded with the full run artifacts: `task.md`, `eval_set.jsonl`, `gold_standard.jsonl`, `metric.yaml`, and every iteration's `prompt.txt`, `outputs.jsonl`, `scores.json`, `overseer_analysis.md`. The Overseer's own context is deliberately *not* inherited — we want a fresh read.
 
-Output is `diagnosis.json` with a typed finding list:
+### Evidence invariant (Apr 21 review)
+
+**Every finding must cite concrete evidence; free-floating narrative is rejected.** Schema-enforced via Pydantic validators on the diagnosis JSON: a finding without populated `evidence.iterations`, `evidence.example_ids`, and `evidence.score_breakdown` fails validation and the Analyst is asked to re-emit. This turns the postmortem into a debuggable audit: when a diagnosis is later judged wrong, we can walk back through the exact evidence the Analyst cited and see where it reasoned incorrectly.
+
+Output is `diagnosis.json`:
 
 ```json
 {
@@ -69,9 +84,14 @@ Output is `diagnosis.json` with a typed finding list:
       "confidence": 0.92,
       "summary": "Three scenarios involving content escaping scored 0 in every iteration.",
       "evidence": {
+        "iterations": [1, 2, 3, 4],
         "scenarios": ["gui_launch_with_content", "json_content", "content_special_chars"],
-        "iterations_affected": [1, 2, 3],
-        "example_ids": ["ex001", "ex002", "ex008"]
+        "example_ids": ["ex001", "ex002", "ex008"],
+        "score_breakdown": {
+          "ex001": {"iter_1": 0.0, "iter_2": 0.0, "iter_3": 0.0, "iter_4": 0.0},
+          "ex002": {"iter_1": 0.0, "iter_2": 0.0, "iter_3": 0.0, "iter_4": 0.0},
+          "ex008": {"iter_1": 0.0, "iter_2": 0.0, "iter_3": 0.0, "iter_4": 0.0}
+        }
       },
       "root_cause_hypothesis": "The prompt has no rules covering PowerShell content-escaping for nested quotes, newlines, or special characters. Outputs consistently emit unquoted content that breaks when the shell evaluates it."
     }
@@ -81,23 +101,40 @@ Output is `diagnosis.json` with a typed finding list:
 }
 ```
 
-Finding types (closed set): `scenario_blindspot`, `prompt_gap`, `metric_mismatch`, `eval_coverage_gap`, `overseer_local_optimum`, `model_fit_issue`. Each finding cites evidence by iteration/example id so the report can link back to the artifacts.
+Finding types (closed set): `scenario_blindspot`, `prompt_gap`, `metric_mismatch`, `eval_coverage_gap`, `overseer_local_optimum`, `model_fit_issue`. All six require the full `evidence` block. `metric_mismatch` and `model_fit_issue` additionally require evidence that distinguishes the diagnosis from easier alternatives (e.g., a `metric_mismatch` claim must cite examples where the metric gave the *wrong* score, not merely a low one).
 
 ## 5. What "remediation proposal" looks like
 
-The same model call (or an immediate follow-up turn) produces `proposal.md` with one or more **typed interventions**:
+The same model call (or an immediate follow-up turn) produces `proposal.md` plus a machine-readable `proposal.json` with one or more **typed interventions**. Every intervention carries a `fixes` list referencing the finding IDs it addresses — an intervention with no finding references fails schema validation (Apr 21 evidence invariant).
 
-| Intervention type | Effect | Applied by postmortem? |
+| Intervention type | Effect | Auto-applicable on threshold? |
 |---|---|---|
-| `prompt_patch` | Append/replace specific rules in `prompt.txt.best` | Yes, into a retry-scratch copy |
-| `seed_reset` | Replace the seed prompt with a new one that bakes in missing rules | Yes, into retry-scratch |
-| `metric_patch` | Add/modify rules in `metric.yaml` | Yes, into a `metric.postmortem.yaml` sidecar used only for the retry |
+| `prompt_patch` | Append/replace specific rules in `prompt.txt.best` | **Yes** — written to retry-scratch; auto-committed if the decision gate accepts |
+| `seed_reset` | Replace the seed prompt with a new one that bakes in missing rules | **Yes** — same treatment as `prompt_patch` (higher confidence bar; see §9) |
+| `metric_patch` | Add/modify rules in `metric.yaml` | **No** — per Apr 21 review, **always** report-only. A `metric.postmortem.yaml` sidecar is written so operators can inspect + apply manually; the decision gate never commits it |
 | `eval_addition` | Propose new eval examples stressing the missing category | **No** — logged for human review only |
 | `model_swap_suggestion` | Flag that this failure pattern is characteristic of model X's limitations | **No** — advisory |
 
-Each intervention carries a confidence score and an `expected_impact` range (e.g. "+10 to +25 on remediation-weighted score"). Interventions can be composed — a realistic proposal might bundle one `prompt_patch` and one `metric_patch`.
+Example intervention with the mandatory `fixes` field:
 
-**Never auto-modified on disk:** `eval_set.jsonl`, `gold_standard.jsonl`, the original `prompt.txt.best`, the original `metric.yaml`. The postmortem only ever writes into `runs/<slug>/postmortem/` until the decision gate says otherwise.
+```json
+{
+  "id": "I1",
+  "type": "prompt_patch",
+  "fixes": ["F1", "F3"],
+  "confidence": 0.88,
+  "expected_impact": {"global": [5, 12], "remediation": [15, 35]},
+  "patch": {
+    "mode": "append",
+    "after_section": "## Rules",
+    "content": "- Content containing single quotes: replace each with two single quotes before interpolating.\n- Content containing double quotes: wrap the whole string in single-quoted here-strings @'...'@.\n- Content containing newlines: use `\n` sequences inside double-quoted strings only."
+  }
+}
+```
+
+Interventions can be composed — a realistic proposal might bundle one `prompt_patch` and one `metric_patch`. When a proposal contains both auto-applicable and report-only interventions, the auto-applicable ones proceed to focused validation; the report-only ones are copied verbatim into `report.md` for human review.
+
+**Never auto-modified on disk:** `eval_set.jsonl`, `gold_standard.jsonl`, the original `prompt.txt.best`, the original `metric.yaml`. The postmortem only ever writes into `runs/<slug>/postmortem/` until the decision gate explicitly promotes a retry winner (prompt/seed only).
 
 ## 6. How the focused retry scopes down
 
@@ -123,11 +160,14 @@ max_scenario_regression <= config.postmortem.regression_tolerance           (def
 
 `AND` semantics chosen deliberately: any one threshold alone can be gamed (global alone misses concentrated regressions; remediation alone allows Goodharting the failing subset at the cost of the rest; regression tolerance alone gives credit for doing nothing).
 
-Three decision outcomes written to `decision.json`:
+**The gate applies only to `prompt_patch` and `seed_reset` interventions.** Per Apr 21 review, `metric_patch` is always report-only — the thresholds do not authorize committing a metric change, ever. If a proposal contains only `metric_patch` and/or `eval_addition` interventions, the focused retry is skipped entirely and the decision is `abstained`.
 
-- **`accepted`** — thresholds met. Postmortem promotes the retry winner: copies `retry/prompt.txt.best` to `runs/<slug>/prompt.txt.best`, copies `retry/winner/` into a new `winner/` with provenance field `source: "postmortem"`, leaves the original winner in `winner.pre_postmortem/` for rollback.
+Four decision outcomes written to `decision.json`:
+
+- **`accepted`** — thresholds met on auto-applicable interventions. Postmortem promotes the retry winner: copies `retry/prompt.txt.best` to `runs/<slug>/prompt.txt.best`, copies `retry/winner/` into a new `winner/` with provenance field `source: "postmortem"`, leaves the original winner in `winner.pre_postmortem/` for rollback.
 - **`rejected`** — thresholds not met. Original winner untouched. `proposal.md` and `diagnosis.json` remain on disk; operator can inspect and optionally apply manually.
-- **`abstained`** — proposal contained only interventions the postmortem can't apply unilaterally (e.g. pure `eval_addition`). No retry was run. Report lists the human-approval items.
+- **`abstained`** — proposal contained no auto-applicable interventions (only `metric_patch`, `eval_addition`, and/or `model_swap_suggestion`). No retry was run. Report lists the human-approval items in priority order.
+- **`partial`** — proposal mixed auto-applicable and report-only interventions. The auto-applicable subset was validated; if it passed thresholds the prompt/seed change is committed and the report-only interventions are listed for human review separately.
 
 ## 8. Relationship to the main ratchet
 
@@ -141,13 +181,21 @@ No new engine, no new scorer, no fork of the ratchet. If a future Stage expands 
 
 ---
 
-## 9. Open questions for review
+## 9. Resolved review items & remaining design calls
 
-1. **Autonomous vs propose-only as the MCP default.** Current proposal: autonomous in MCP mode (a caller who asks for a postmortem expects a verdict), propose-only in UI. Is that the right split, or should MCP also default to propose-only with an explicit `--apply` flag?
-2. **How aggressive should `seed_reset` be?** Resetting the prompt to a new seed is a bigger intervention than a patch — it potentially throws away iterations of Overseer work. Should `seed_reset` require higher confidence than `prompt_patch` (e.g. ≥0.85 vs ≥0.7)?
-3. **Cost ceiling per postmortem.** Rough estimate: 1 Opus-grade diagnostic call (~$0.50–$2.00 depending on run-history size) + 3 retry iterations (~3× a normal iteration cost). A realistic per-postmortem budget is $2–$10. Should this inherit the task's existing `cost_cap_usd` as remaining headroom, or have its own separate cap?
-4. **What about cost_cap-terminated runs?** Current proposal skips postmortem when the main loop died on budget. Reasonable because the problem is "we ran out of money," not "the prompt can be improved." But a postmortem on a budget-killed run could still surface whether the cost was buying real progress or churning. Worth including with a shorter retry budget?
-5. **Interactions with Strategy B/C.** For `parallel_independent`, postmortem runs per-slug and each slug's findings are independent. For `unified_portable`, one postmortem per task with per-model evidence. Confirmed, or do you want a cross-slug finding type ("this intervention would help slug X but hurt slug Y")?
+**Resolved in Apr 21 review:**
+
+1. *Autonomous MCP default?* — **Opt-in only.** MCP tool + CLI are the only entry points. No auto-invocation.
+2. *Cost ceiling?* — **Separate budget.** `postmortem.cost_cap_usd` (default `$2.50`), independent of the task's own cap.
+3. *Cross-slug findings?* — **Out of scope for v1.** Per-slug independent. Revisit after real-world usage.
+4. *Metric-patch auto-commit?* — **Never.** `metric_patch` interventions are always report-only regardless of thresholds. The decision gate authorizes `prompt_patch` and `seed_reset` only.
+5. *Evidence requirement?* — **Enforced at schema layer.** Findings without iteration/scenario/score evidence fail validation; interventions without `fixes` references fail validation.
+
+**Remaining design calls I'll make during implementation unless told otherwise:**
+
+- **`seed_reset` confidence bar.** Resetting the prompt is a bigger intervention than patching. Default confidence floor: `≥ 0.85` for `seed_reset` vs `≥ 0.70` for `prompt_patch`. Configurable via `postmortem.min_confidence_seed_reset` and `postmortem.min_confidence_prompt_patch`.
+- **Cost-cap-terminated main runs.** Skip the postmortem by default — if the task's main loop died on budget, the operator should fix the budget first. Overridable via MCP tool argument `allow_on_cost_cap=True`.
+- **Mode default.** MCP tool defaults to `mode="autonomous"` (diagnose → patch → retry → decide). CLI defaults to `mode="propose_only"` (diagnose → emit proposal → stop before retry). This mirrors the existing headless/interactive split across the codebase.
 
 ## 10. Risks
 
