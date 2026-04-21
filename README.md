@@ -107,7 +107,7 @@ LPO has a **web UI** (FastAPI + React + Tailwind) for visual inspection, live ru
 
 - `lpo_create_task` — author a task bundle from a description and inputs
 - `lpo_generate_gold_standard` — fill in reference outputs
-- `lpo_run_optimization` — run the ratchet to completion
+- `lpo_run_optimization` — run the ratchet to completion (optional `target_slugs` filter restricts a multi-target task to a subset, e.g. LM-Studio-only, without editing `config.yaml`)
 - `lpo_get_status` — iteration count, best score, cost
 - `lpo_get_winner` — return the winning prompt and its report
 - `lpo_get_comparison` — cross-model report for Strategies B and C

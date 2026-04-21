@@ -141,7 +141,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "Run the ratchet loop headlessly until stop conditions are met and "
             "return a summary that includes the winning prompt(s). Blocks for "
             "the duration of the optimization. mode must be 'autonomous' "
-            "(default) — manual/visual/supervised modes are UI-only."
+            "(default) — manual/visual/supervised modes are UI-only. By "
+            "default runs every target in config.yaml; pass target_slugs to "
+            "restrict to a subset (e.g. LM-Studio-only to avoid paid API "
+            "spend) without editing config.yaml."
         ),
         "inputSchema": {
             "type": "object",
@@ -156,6 +159,16 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["auto", "overseer", "null"],
                     "default": "auto",
+                },
+                "target_slugs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional subset of target slugs from config.yaml to "
+                        "run. Omit or pass null to run every configured "
+                        "target. Useful for local-only dry runs that skip "
+                        "paid providers."
+                    ),
                 },
                 "fresh": {"type": "boolean", "default": False},
                 "stop_conditions": {
@@ -342,6 +355,32 @@ class LpoMcpHandlers:
             )
         mutator = args.get("mutator", "auto")
         fresh = bool(args.get("fresh", False))
+
+        # Optional per-call target filter. Lets the caller restrict a multi-
+        # target task to, e.g., LM-Studio-only without editing config.yaml.
+        # We mutate the in-memory TaskBundle only; disk is untouched.
+        requested_slugs = args.get("target_slugs")
+        if requested_slugs is not None:
+            if not isinstance(requested_slugs, list) or not all(
+                isinstance(s, str) for s in requested_slugs
+            ):
+                raise McpToolError(
+                    "target_slugs must be an array of strings or omitted."
+                )
+            if not requested_slugs:
+                raise McpToolError(
+                    "target_slugs is empty; pass at least one slug or omit the arg."
+                )
+            available = {m.slug for m in task.config.target_models}
+            unknown = [s for s in requested_slugs if s not in available]
+            if unknown:
+                raise McpToolError(
+                    f"Unknown target_slugs {unknown!r}. Configured slugs for "
+                    f"task {task_id!r}: {sorted(available)}."
+                )
+            # Preserve the order declared in config.yaml (deterministic).
+            kept = [m for m in task.config.target_models if m.slug in set(requested_slugs)]
+            task.config.target_models = kept
 
         # Apply stop_conditions overrides in memory (do NOT mutate config.yaml).
         override = args.get("stop_conditions") or {}

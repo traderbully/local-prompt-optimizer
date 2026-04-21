@@ -263,6 +263,74 @@ async def test_run_optimization_single_writes_winner(handlers: LpoMcpHandlers):
 
 
 @pytest.mark.asyncio
+async def test_run_optimization_respects_target_slugs(handlers: LpoMcpHandlers):
+    # Two-target parallel_independent task; asking for only one slug must run
+    # only that slug and leave the other's runs/ directory absent.
+    await handlers.call(
+        "lpo_create_task",
+        {
+            "name": "filtered",
+            "task_description": "Return a fixed JSON object.",
+            "example_inputs": ["q1"],
+            "output_type": "json",
+            "required_json_fields": ["echo"],
+            "strategy": "parallel_independent",
+            "target_models": [
+                _stub_target_spec("alpha").to_config(),
+                _stub_target_spec("beta").to_config(),
+            ],
+        },
+    )
+
+    out = await handlers.call(
+        "lpo_run_optimization",
+        {
+            "task_id": "filtered",
+            "mutator": "null",
+            "fresh": True,
+            "target_slugs": ["alpha"],
+            "stop_conditions": {"max_iterations": 1, "target_score": 0},
+        },
+    )
+    assert out.get("status") == "done", out
+    assert out["strategy"] == "parallel_independent"
+    slugs_in_result = {r["slug"] for r in out["per_model"]}
+    assert slugs_in_result == {"alpha"}, out
+
+    task_root = handlers.tasks_root / "filtered"
+    assert (task_root / "runs" / "alpha").exists()
+    assert not (task_root / "runs" / "beta").exists(), (
+        "beta should have been skipped by target_slugs filter"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_rejects_unknown_target_slug(handlers: LpoMcpHandlers):
+    await handlers.call(
+        "lpo_create_task",
+        {
+            "name": "filt2",
+            "task_description": "x",
+            "example_inputs": ["a"],
+            "strategy": "parallel_independent",
+            "target_models": [
+                _stub_target_spec("alpha").to_config(),
+                _stub_target_spec("beta").to_config(),
+            ],
+        },
+    )
+    out = await handlers.call(
+        "lpo_run_optimization",
+        {"task_id": "filt2", "target_slugs": ["ghost"]},
+    )
+    assert "error" in out
+    assert "ghost" in out["error"]
+    # Error message must list the real slugs so the operator can fix the call.
+    assert "alpha" in out["error"]
+    assert "beta" in out["error"]
+
+
+@pytest.mark.asyncio
 async def test_get_winner_requires_slug_for_parallel(handlers: LpoMcpHandlers):
     await handlers.call(
         "lpo_create_task",
