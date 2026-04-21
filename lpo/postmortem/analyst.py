@@ -455,11 +455,19 @@ def _try_parse(
     if not isinstance(data, dict):
         return None, f"expected a JSON object at top level, got {type(data).__name__}"
 
-    # Stamp analyst_model_id if the model forgot to (keeps validation
-    # passing without rewriting the prompt template when models rotate).
+    # Stamp analyst_model_id with the authoritative value from the API
+    # response (served model id). The model's self-reported identity in
+    # its JSON output is unreliable: Claude models often misidentify
+    # themselves (e.g. an opus-4-5 endpoint may self-report as
+    # "claude-sonnet-4-20250514" because that's the latest snapshot the
+    # model was trained to know about). We overwrite unconditionally so
+    # that the envelope (which also uses the API-served id) and the
+    # diagnosis.json payload agree. The prior setdefault behaviour
+    # shipped the model's guess to disk and created a confusing
+    # provenance discrepancy surfaced during the Stage-8 validation run.
     diagnosis = data.get("diagnosis")
     if isinstance(diagnosis, dict):
-        diagnosis.setdefault("analyst_model_id", analyst_model_id)
+        diagnosis["analyst_model_id"] = analyst_model_id
 
     try:
         plan = PostmortemPlan.model_validate(data)
