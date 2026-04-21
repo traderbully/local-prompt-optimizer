@@ -124,6 +124,19 @@ class RunConfig(BaseModel):
 
     eval_concurrency: int = 4
 
+    # Stage 8 — postmortem tuning. Opt-in at invocation time (no enabled
+    # flag here per Apr 21 review); these fields govern thresholds, budget,
+    # and confidence bars *if* the operator invokes the postmortem phase.
+    # The nested model is defined in lpo.postmortem.schemas, which has no
+    # back-reference to this module, so a direct import is safe.
+    postmortem: "PostmortemConfig" = Field(  # noqa: F821  (resolved via model_rebuild below)
+        default_factory=lambda: _default_postmortem_config(),
+        description=(
+            "Postmortem phase tuning (Stage 8). Defaults applied when omitted. "
+            "See lpo.postmortem.schemas.PostmortemConfig."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_strategy(self) -> "RunConfig":
         n = len(self.target_models)
@@ -234,3 +247,31 @@ def load_gold_standard(path: Path) -> dict[str, GoldRecord]:
         return {}
     records = [GoldRecord.model_validate(r) for r in _iter_jsonl(path)]
     return {r.id: r for r in records}
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 postmortem — deferred forward-reference wiring
+# ---------------------------------------------------------------------------
+#
+# RunConfig declares a ``postmortem: "PostmortemConfig"`` field. The concrete
+# class lives in lpo.postmortem.schemas (one-way import: that module does not
+# import from here). We resolve the forward reference and provide a default
+# factory at module load time so that RunConfig is fully usable without the
+# caller having to touch lpo.postmortem directly.
+
+
+def _default_postmortem_config() -> "PostmortemConfig":  # noqa: F821
+    """Default-factory for :class:`RunConfig.postmortem`. Defined here
+    rather than inline because Pydantic's default_factory is evaluated
+    per-instance and we want the import cost paid once."""
+    from lpo.postmortem.schemas import PostmortemConfig
+    return PostmortemConfig()
+
+
+# Resolve the forward reference ``"PostmortemConfig"`` on RunConfig. After
+# this call, ``RunConfig.model_fields["postmortem"].annotation`` is the
+# real class rather than a string, which is what downstream serializers
+# (notably the MCP transport layer) require.
+from lpo.postmortem.schemas import PostmortemConfig  # noqa: E402  (intentional late import)
+
+RunConfig.model_rebuild()
