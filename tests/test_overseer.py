@@ -129,14 +129,32 @@ def test_estimate_tokens_monotonic():
 
 def test_cost_tracker_longest_prefix_and_total():
     t = CostTracker()
+    # Specific-snapshot id should resolve to the longer "claude-opus-4-5"
+    # prefix ($5 input / $25 output), not the shorter "claude-opus-4" family
+    # prefix ($15 / $75). This is exactly why the rate table keeps both.
     call = t.record("claude-opus-4-5-20250101", prompt_tokens=1_000_000, completion_tokens=0)
-    # claude-opus-4 prefix matches → $15 per 1M input tokens.
-    assert call.usd == pytest.approx(15.0)
+    assert call.usd == pytest.approx(5.0)
     t.record("claude-opus-4-5-20250101", prompt_tokens=0, completion_tokens=1_000_000)
-    # Add $75 output rate → total $90.
-    assert t.total_usd == pytest.approx(90.0)
-    assert t.over_cap(89.0)
+    # Add $25 output rate → total $30.
+    assert t.total_usd == pytest.approx(30.0)
+    assert t.over_cap(29.0)
     assert not t.over_cap(100.0)
+
+
+def test_cost_tracker_opus_4_family_prefix_still_15_75():
+    """Opus 4 / 4.1 stayed on the legacy $15/$75 tier. The shorter
+    'claude-opus-4' family prefix must still resolve those snapshots even
+    after the 4.5/4.6/4.7 rate split."""
+    t = CostTracker()
+    call = t.record("claude-opus-4-1-20250805", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert call.usd == pytest.approx(90.0)  # 15 + 75
+
+
+def test_cost_tracker_haiku_4_5_uses_new_rate():
+    """Haiku 4.5 is $1/$5, distinct from the legacy $0.80/$4 of 3.5."""
+    t = CostTracker()
+    call = t.record("claude-haiku-4-5-20251001", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert call.usd == pytest.approx(6.0)  # 1 + 5
 
 
 def test_cost_tracker_unknown_model_is_free():

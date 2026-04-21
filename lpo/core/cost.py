@@ -1,7 +1,12 @@
 """Cost tracking for billable model calls. See `LPO_SDP.md` §4.9, §6.2.
 
-Prices are USD per 1M tokens. Rates default to Claude Opus 4.x public pricing
-and can be overridden per-model via ``CostTracker.set_rate``.
+Prices are USD per 1M tokens (public API base-input / base-output rates).
+Rates are matched against ``model_id`` with a longest-prefix search so that
+a specific snapshot ('claude-opus-4-5-20251101') picks up the right
+generation-specific rate before falling back to the family prefix.
+Overridable per-tracker via :meth:`CostTracker.set_rate`.
+
+Source: Anthropic pricing page (checked 2026-04-21).
 """
 
 from __future__ import annotations
@@ -9,13 +14,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from threading import Lock
 
-# Default prices (USD per 1M tokens). Kept conservative and easy to update.
+# Default prices (USD per 1M tokens). Longest-prefix match; keep more-specific
+# entries *in addition to* family prefixes so future snapshots inherit the
+# right rate without silent regressions.
 DEFAULT_RATES: dict[str, tuple[float, float]] = {
     # model_id prefix: (input_per_mtok, output_per_mtok)
+    # ---- Opus 4.x family -------------------------------------------------
+    # Opus 4 and 4.1 remain on the original $15/$75 tier.
     "claude-opus-4": (15.0, 75.0),
-    "claude-opus-4-7": (15.0, 75.0),
+    # Opus 4.5 / 4.6 / 4.7 moved to a cheaper $5/$25 tier. The longer prefix
+    # wins over "claude-opus-4" for these generations.
+    "claude-opus-4-5": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    # ---- Sonnet 4.x family (all tiers priced uniformly) ------------------
     "claude-sonnet-4": (3.0, 15.0),
-    "claude-haiku-4": (0.8, 4.0),
+    # ---- Haiku 4.x family ------------------------------------------------
+    # Haiku 4.5 is priced higher than Haiku 3.5 ($1/$5 vs $0.80/$4). Family
+    # prefix pins the 4.x rate; the explicit 4-5 prefix is redundant today
+    # but documents intent for future snapshots.
+    "claude-haiku-4": (1.0, 5.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    # ---- Legacy 3.5 family ----------------------------------------------
     "claude-3-5-sonnet": (3.0, 15.0),
     "claude-3-5-haiku": (0.8, 4.0),
 }
