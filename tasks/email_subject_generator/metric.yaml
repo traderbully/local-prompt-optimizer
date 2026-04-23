@@ -1,0 +1,14 @@
+type: rubric
+judge_model: claude-opus-4-7
+criteria:
+- name: overall_quality
+  weight: 100
+  description: 'Rate how well the output matches the task description and the gold-standard
+    answer. Task: Generate a short, clear email subject line (under 10 words) that
+    captures the main point of the email body. The subject should be informative enough
+    that the recipient knows what the email is about without opening it, but concise
+    enough to display in a mobile inbox preview.'
+  anchors:
+    0: "Unusable \u2014 wrong format or off-topic."
+    50: Partially correct but missing important aspects.
+    100: Matches the gold answer in meaning and format.

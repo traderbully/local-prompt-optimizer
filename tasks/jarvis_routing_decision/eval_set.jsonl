@@ -1,0 +1,18 @@
+{"id": "ex001", "input": "Turn the Pi volume up", "scenario": "pi_volume_up"}
+{"id": "ex002", "input": "Send me a picture of the Eiffel Tower", "scenario": "telegram_photo"}
+{"id": "ex003", "input": "Create a text file on my desktop called notes.txt with the content 'Meeting at 3pm'", "scenario": "file_create"}
+{"id": "ex004", "input": "What did you just say?", "scenario": "session_recall"}
+{"id": "ex005", "input": "Let's play Rocket League", "scenario": "game_launch"}
+{"id": "ex006", "input": "Search my email for anything from Amazon this week", "scenario": "email_search"}
+{"id": "ex007", "input": "Mute the Pi", "scenario": "pi_volume_mute"}
+{"id": "ex008", "input": "Send a photo of a golden retriever to Telegram", "scenario": "telegram_photo"}
+{"id": "ex009", "input": "Delete the file C:/Users/Administrator/Desktop/old.txt", "scenario": "file_delete"}
+{"id": "ex010", "input": "Open Rocket League for training mode", "scenario": "game_training"}
+{"id": "ex011", "input": "Read the last 5 emails in my inbox", "scenario": "email_inbox"}
+{"id": "ex012", "input": "What have we been talking about today?", "scenario": "session_summary"}
+{"id": "ex013", "input": "Unsubscribe me from all the promotional emails from the past 30 days", "scenario": "email_unsubscribe"}
+{"id": "ex014", "input": "Make a folder called Projects on my desktop", "scenario": "file_mkdir"}
+{"id": "ex015", "input": "Set the Pi volume to 60 percent", "scenario": "pi_volume_set"}
+{"id": "ex016", "input": "Send an email to mike@example.com about the Q3 numbers", "scenario": "email_send"}
+{"id": "ex017", "input": "Summarize my recent conversations with you", "scenario": "session_summary"}
+{"id": "ex018", "input": "Launch Rocket League but don't navigate anywhere", "scenario": "game_launch_only"}

@@ -1,0 +1,32 @@
+type: deterministic
+rules:
+- name: json_valid
+  weight: 30
+  check: is_valid_json
+- name: required_fields_present
+  weight: 40
+  check: has_keys
+  params:
+  - skill_id
+  - action
+  - confidence
+# Routing decision: skill_id + action must match gold exactly. Stage-8 F1
+# (2026-04-22) surfaced that bundling `confidence` into this rule capped
+# aggregate at ~92.8 because gold confidences are hidden per-example floats
+# the model cannot observe. Split into two rules keeping the original
+# 30-weight budget: 20 for the routing decision, 10 for a range-check on
+# confidence (task description frames it as a subjective self-estimate).
+- name: field_exact_match
+  weight: 20
+  check: exact_match_against_gold
+  params:
+    fields:
+    - skill_id
+    - action
+- name: confidence_in_range
+  weight: 10
+  check: numeric_range
+  params:
+    field: confidence
+    min: 0.5
+    max: 1.0

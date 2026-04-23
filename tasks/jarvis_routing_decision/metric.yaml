@@ -1,0 +1,15 @@
+type: deterministic
+rules:
+- name: json_valid
+  weight: 30
+  check: is_valid_json
+- name: required_fields_present
+  weight: 40
+  check: has_keys
+  params:
+  - skill_id
+  - action
+  - confidence
+- name: field_exact_match
+  weight: 30
+  check: exact_match_against_gold

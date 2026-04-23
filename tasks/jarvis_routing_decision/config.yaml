@@ -1,0 +1,23 @@
+task_name: jarvis_routing_decision
+mode: autonomous
+target_strategy: single
+target_models:
+- slug: gpt-4-1-mini
+  provider: openrouter
+  model_id: openai/gpt-4.1-mini
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+overseer_model:
+  provider: anthropic
+  model_id: claude-opus-4-7
+  api_key_env: ANTHROPIC_API_KEY
+stop_conditions:
+  target_score: 95.0
+  max_iterations: 20
+  plateau_patience: 5
+  cost_cap_usd: 5.0
+metric_evolution:
+  enabled: true
+  require_user_approval: true
+output_type: json
+eval_concurrency: 4

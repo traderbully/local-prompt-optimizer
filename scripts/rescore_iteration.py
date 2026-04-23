@@ -3,7 +3,11 @@ without regenerating anything from the model.
 
 Usage (from repo root):
 
-    python scripts\rescore_iteration.py <task_dir> <slug> <iter_index>
+    python scripts\rescore_iteration.py <task_dir> <slug> <iter_index> [--apply]
+
+Pass ``--apply`` to rewrite ``outputs.jsonl`` (per-row ``score`` /
+``per_criterion`` / ``rationale``) and ``scores.json`` with the new values.
+Without ``--apply`` the command is read-only (just prints the diff).
 
 Example:
 
@@ -61,12 +65,15 @@ def _load_outputs(iter_dir: Path) -> tuple[dict[str, str], dict[str, float]]:
 
 
 async def main() -> int:
-    if len(sys.argv) != 4:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if len(args) != 3:
         print(__doc__)
         return 2
-    task_dir = Path(sys.argv[1]).resolve()
-    slug = sys.argv[2]
-    iter_index = int(sys.argv[3])
+    task_dir = Path(args[0]).resolve()
+    slug = args[1]
+    iter_index = int(args[2])
+    apply = "--apply" in flags
 
     task = TaskBundle.load(task_dir)
     iter_dir = task_dir / "runs" / slug / "history" / f"iter_{iter_index:04d}"
@@ -121,6 +128,38 @@ async def main() -> int:
 
     print()
     print(f"Failed (score < 70): {', '.join(agg.failed_ids) if agg.failed_ids else '(none)'}")
+
+    if apply:
+        # Rewrite outputs.jsonl with fresh score/per_criterion/rationale.
+        out_path = iter_dir / "outputs.jsonl"
+        new_lines: list[str] = []
+        with out_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                res = score_map.get(row["id"])
+                if res is not None:
+                    row["score"] = res.aggregate
+                    row["per_criterion"] = dict(res.per_criterion)
+                    row["rationale"] = res.rationale
+                new_lines.append(json.dumps(row, ensure_ascii=False))
+        out_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+        scores_path = iter_dir / "scores.json"
+        scores_doc = {
+            "aggregate": agg.aggregate,
+            "per_example": {k: v for k, v in agg.per_example.items()},
+            "per_scenario": {k: v for k, v in agg.per_scenario.items()},
+            "failed_ids": list(agg.failed_ids),
+        }
+        scores_path.write_text(json.dumps(scores_doc, indent=2), encoding="utf-8")
+
+        print()
+        print(f"[apply] wrote {out_path}")
+        print(f"[apply] wrote {scores_path}")
+
     return 0
 
 

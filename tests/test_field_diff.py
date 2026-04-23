@@ -12,6 +12,7 @@ from lpo.scoring.deterministic import (
     CheckResult,
     DeterministicScorer,
     check_exact_match_against_gold,
+    check_numeric_range,
 )
 
 
@@ -109,6 +110,85 @@ def test_ps_normalization_does_not_cross_paths():
         '{"verify_command": "-not (Test-Path \'C:\\\\b\')"}',
         gold, _rec(), None,
     )
+    assert r.score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# exact_match_against_gold `fields` subset filter (Stage-8 F1 on
+# jarvis_routing_opus, 2026-04-22). When `params={"fields": [...]}` is
+# supplied only those keys participate in exact-match; other gold keys are
+# expected to be scored by a different rule.
+# ---------------------------------------------------------------------------
+
+
+def test_fields_filter_scores_subset_only():
+    gold = GoldRecord(id="x", output={"skill_id": "s1", "action": "a1", "confidence": 0.98})
+    out = '{"skill_id": "s1", "action": "a1", "confidence": 0.42}'
+    # Without the filter, confidence mismatch drops the score to 2/3.
+    r_full = check_exact_match_against_gold(out, gold, _rec(), None)
+    assert r_full.score == pytest.approx(200.0 / 3)
+    # With a filter that excludes confidence, we should get a perfect score.
+    r_filtered = check_exact_match_against_gold(
+        out, gold, _rec(), {"fields": ["skill_id", "action"]}
+    )
+    assert r_filtered.score == 100.0
+
+
+def test_fields_filter_empty_scope_does_not_divide_by_zero():
+    gold = GoldRecord(id="x", output={"a": 1})
+    r = check_exact_match_against_gold(
+        '{"a": 2}', gold, _rec(), {"fields": ["nonexistent"]}
+    )
+    assert r.score == 100.0  # no fields in scope → trivially satisfied
+
+
+def test_fields_filter_rejects_malformed_params():
+    gold = GoldRecord(id="x", output={"a": 1})
+    with pytest.raises(ValueError):
+        check_exact_match_against_gold('{"a": 1}', gold, _rec(), {"fields": "a,b"})
+
+
+# ---------------------------------------------------------------------------
+# numeric_range check (Stage-8 F1). Score 100 if `output[field]` is a
+# number in [min, max]; else 0. Used to replace exact-match on
+# subjective/self-estimated numeric fields like confidence.
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_range_inside_band_scores_100():
+    r = check_numeric_range('{"confidence": 0.85}', None, _rec(), {"field": "confidence", "min": 0.5, "max": 1.0})
+    assert r.score == 100.0
+
+
+def test_numeric_range_boundary_inclusive():
+    params = {"field": "x", "min": 0.5, "max": 1.0}
+    assert check_numeric_range('{"x": 0.5}', None, _rec(), params).score == 100.0
+    assert check_numeric_range('{"x": 1.0}', None, _rec(), params).score == 100.0
+
+
+def test_numeric_range_outside_band_scores_0():
+    params = {"field": "confidence", "min": 0.5, "max": 1.0}
+    assert check_numeric_range('{"confidence": 0.3}', None, _rec(), params).score == 0.0
+    assert check_numeric_range('{"confidence": 1.2}', None, _rec(), params).score == 0.0
+
+
+def test_numeric_range_rejects_bool_masquerading_as_number():
+    # Regression: bool is a subclass of int in Python; we must not treat
+    # `true`/`false` as 1/0 here.
+    r = check_numeric_range(
+        '{"confidence": true}', None, _rec(), {"field": "confidence", "min": 0.5, "max": 1.0}
+    )
+    assert r.score == 0.0
+
+
+def test_numeric_range_missing_field_scores_0():
+    r = check_numeric_range('{"other": 0.9}', None, _rec(), {"field": "confidence"})
+    assert r.score == 0.0
+    assert "missing" in r.detail
+
+
+def test_numeric_range_unparseable_output_scores_0():
+    r = check_numeric_range("not json at all", None, _rec(), {"field": "x"})
     assert r.score == 0.0
 
 

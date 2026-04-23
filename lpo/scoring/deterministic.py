@@ -142,6 +142,11 @@ def check_exact_match_against_gold(
     and the detail lists the exact mismatched fields with their expected and
     actual values. This is the feedback channel the Overseer uses to narrow in
     on which field is wrong (identified in the Stage 2 smoke test).
+
+    Optional ``params={"fields": [...]}`` restricts the comparison to a
+    subset of gold keys. Useful when some fields are subjective / tolerance-
+    band scored by a separate rule and shouldn't participate in exact match.
+    Motivated by Stage-8 F1 on jarvis_routing_opus (2026-04-22).
     """
     if gold is None:
         return CheckResult(0.0, "no gold standard for this example")
@@ -151,6 +156,13 @@ def check_exact_match_against_gold(
         out_obj = None
     gold_obj = gold.output
 
+    fields_filter: set[str] | None = None
+    if isinstance(params, dict) and "fields" in params:
+        raw = params["fields"]
+        if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+            raise ValueError("exact_match_against_gold params.fields must be list[str]")
+        fields_filter = set(raw)
+
     # Dict vs dict → field-level partial credit + diff detail.
     if isinstance(out_obj, dict) and isinstance(gold_obj, dict):
         if not gold_obj:
@@ -158,7 +170,11 @@ def check_exact_match_against_gold(
         matches: list[str] = []
         mismatches: list[str] = []
         missing: list[str] = []
+        keys_considered: list[str] = []
         for k, expected in gold_obj.items():
+            if fields_filter is not None and k not in fields_filter:
+                continue
+            keys_considered.append(k)
             if k not in out_obj:
                 missing.append(k)
                 continue
@@ -175,7 +191,11 @@ def check_exact_match_against_gold(
                 mismatches.append(
                     f"{k}: expected={_short(expected)} got={_short(out_obj[k])}"
                 )
-        total = len(gold_obj)
+        total = len(keys_considered) if fields_filter is not None else len(gold_obj)
+        # fields_filter may name keys the gold doesn't contain — treat as 0/0
+        # rather than dividing by zero.
+        if total == 0:
+            return CheckResult(100.0, "no fields in scope")
         correct = len(matches)
         score = 100.0 * correct / total
         parts: list[str] = []
@@ -236,10 +256,50 @@ def check_regex_match(output: str, gold: GoldRecord | None, inp: EvalRecord, par
     return CheckResult(100.0 if ok else 0.0, "" if ok else f"pattern {pattern!r} did not match")
 
 
+def check_numeric_range(
+    output: str, gold: GoldRecord | None, inp: EvalRecord, params: Any
+) -> CheckReturn:
+    """Score 100 if ``output[field]`` is a number in ``[min, max]``, else 0.
+
+    Gold-independent: this check exists for fields whose gold value is a
+    placeholder / subjective estimate that cannot meaningfully be exact-
+    matched (e.g. a self-reported confidence). Introduced for Stage-8 F1 on
+    jarvis_routing_opus (2026-04-22): confidence was exact-matched against
+    hidden per-example golds, capping scores at 90 despite being specified
+    as a subjective self-estimate in the task description.
+
+    params: ``{"field": str, "min": float (optional), "max": float (optional)}``.
+    Missing min/max default to -inf / +inf, i.e. a pure "must be a number"
+    check. Non-numeric values and missing fields always score 0.
+    """
+    if not isinstance(params, dict) or "field" not in params:
+        raise ValueError("numeric_range requires params={field, min?, max?}")
+    field = params["field"]
+    lo = float(params.get("min", float("-inf")))
+    hi = float(params.get("max", float("inf")))
+    try:
+        obj = _extract_json(output)
+    except ValueError:
+        return CheckResult(0.0, "JSON unparseable")
+    if not isinstance(obj, dict):
+        return CheckResult(0.0, f"top-level JSON is {type(obj).__name__}, expected object")
+    if field not in obj:
+        return CheckResult(0.0, f"field {field!r} missing")
+    val = obj[field]
+    # Reject bools even though bool is a subclass of int — a confidence of
+    # `true` should not score as 1.0.
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return CheckResult(0.0, f"field {field!r} is {type(val).__name__}, expected number")
+    if lo <= float(val) <= hi:
+        return CheckResult(100.0, f"{field}={val} in [{lo}, {hi}]")
+    return CheckResult(0.0, f"{field}={val} not in [{lo}, {hi}]")
+
+
 CHECK_REGISTRY: dict[str, CheckFn] = {
     "is_valid_json": check_is_valid_json,
     "has_keys": check_has_keys,
     "exact_match_against_gold": check_exact_match_against_gold,
+    "numeric_range": check_numeric_range,
     "substring_match": check_substring_match,
     "regex_match": check_regex_match,
 }
